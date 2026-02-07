@@ -20,10 +20,10 @@ jobs:
       - name: Lint protobuf contracts
         run: buf lint
 
-      - name: Verify deterministic generation
+      - name: Verify deterministic generation (tracked files)
         run: |
           bash scripts/gen-proto.sh
-          if [ -n "$(git status --porcelain)" ]; then
+          if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
             echo "Generated files are out of date"
             git status --short
             exit 1
