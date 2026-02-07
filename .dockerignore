@@ -12,3 +12,4 @@ dist
 tmp
 .claude*
 .codex*
+AGENTS.md
