@@ -2,18 +2,19 @@ syntax = "proto3";
 
 package api.v1;
 
-import "google/protobuf/empty.proto";
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/field_mask.proto";
 
 service MetadataService {
-  rpc Health(google.protobuf.Empty) returns (HealthResponse);
-  rpc CreateMetadata(CreateMetadataRequest) returns (MetadataResponse);
-  rpc GetMetadata(GetMetadataRequest) returns (MetadataResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc CreateMetadata(CreateMetadataRequest) returns (CreateMetadataResponse);
+  rpc GetMetadata(GetMetadataRequest) returns (GetMetadataResponse);
   rpc ListMetadata(ListMetadataRequest) returns (ListMetadataResponse);
-  rpc UpdateMetadata(UpdateMetadataRequest) returns (MetadataResponse);
-  rpc DeleteMetadata(DeleteMetadataRequest) returns (google.protobuf.Empty);
+  rpc UpdateMetadata(UpdateMetadataRequest) returns (UpdateMetadataResponse);
+  rpc DeleteMetadata(DeleteMetadataRequest) returns (DeleteMetadataResponse);
 }
+
+message HealthRequest {}
 
 message HealthResponse {
   enum Status {
@@ -88,7 +89,19 @@ message DeleteMetadataRequest {
   bool permanent = 2;
 }
 
-message MetadataResponse {
+message CreateMetadataResponse {
   VideoMetadata metadata = 1;
   bool from_cache = 2;
 }
+
+message GetMetadataResponse {
+  VideoMetadata metadata = 1;
+  bool from_cache = 2;
+}
+
+message UpdateMetadataResponse {
+  VideoMetadata metadata = 1;
+  bool from_cache = 2;
+}
+
+message DeleteMetadataResponse {}
