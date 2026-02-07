@@ -7,12 +7,45 @@ on:
       - main
 
 jobs:
-  ci-test:
-    name: ci-test
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect code changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            code:
+              - 'services/**'
+              - 'packages/**'
+              - 'apps/**'
+              - 'infra/**'
+              - 'policies/**'
+              - 'proto/**'
+              - 'scripts/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'package.json'
+              - 'pnpm-workspace.yaml'
+              - 'turbo.json'
+              - '.github/workflows/**'
+
+  ci-test-unit:
+    name: ci-test-unit
+    needs: changes
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -25,5 +58,53 @@ jobs:
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
 
-      - name: Run test pipeline
-        run: pnpm test
+      - name: Run unit tests
+        run: pnpm test:unit
+
+  ci-test-integration:
+    name: ci-test-integration
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run integration tests
+        run: cargo test -p auth-api --test auth_api_integration && cargo test -p main-api --test main_api_integration
+
+  ci-test-e2e:
+    name: ci-test-e2e
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Start compose stack
+        run: docker compose -f infra/compose/docker-compose.yml --env-file .env.example up -d --build
+
+      - name: Run e2e tests
+        run: cargo test -p e2e-harness --test gateway_e2e -- --nocapture
+
+      - name: Capture compose logs
+        if: failure()
+        run: docker compose -f infra/compose/docker-compose.yml logs --no-color > compose-logs.txt
+
+      - name: Upload compose logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-test-e2e-compose-logs
+          path: compose-logs.txt
+
+      - name: Teardown compose stack
+        if: always()
+        run: docker compose -f infra/compose/docker-compose.yml down --volumes --remove-orphans

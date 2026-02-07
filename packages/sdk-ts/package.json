@@ -7,10 +7,13 @@
   "types": "src/index.ts",
   "scripts": {
     "lint": "echo \"sdk lint placeholder\"",
-    "test": "echo \"sdk test placeholder\"",
+    "test": "vitest run",
     "build": "echo \"sdk build placeholder\""
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.2.0"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.8"
   }
 }

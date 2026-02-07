@@ -6,13 +6,23 @@
   "scripts": {
     "gen": "bash scripts/gen-proto.sh",
     "lint": "turbo run lint",
-    "test": "turbo run test",
+    "test": "pnpm test:unit && pnpm test:integration",
+    "test:unit": "cargo test --workspace --lib --bins && pnpm --filter @media-api-architecture/sdk-ts test",
+    "test:integration": "cargo test -p auth-api --test auth_api_integration && cargo test -p main-api --test main_api_integration",
+    "test:e2e": "cargo test -p e2e-harness --test gateway_e2e -- --nocapture",
+    "test:all": "pnpm test:unit && pnpm test:integration && pnpm test:e2e",
     "build": "turbo run build",
-    "compose:up": "docker compose -f infra/compose/docker-compose.yml up -d",
-    "compose:down": "docker compose -f infra/compose/docker-compose.yml down",
+    "verify": "pnpm lint && pnpm test:all && pnpm build",
+    "compose:up": "docker compose -f infra/compose/docker-compose.yml --env-file .env.example up -d --build",
+    "compose:down": "docker compose -f infra/compose/docker-compose.yml --env-file .env.example down",
     "smoke": "docker compose -f infra/compose/docker-compose.yml config >/dev/null"
   },
   "devDependencies": {
     "turbo": "^2.3.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }
