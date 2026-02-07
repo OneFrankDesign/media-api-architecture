@@ -1,0 +1,45 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Node / pnpm
+node_modules/
+.pnpm-store/
+.npm/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Build artifacts and coverage
+dist/
+build/
+coverage/
+*.lcov
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Turbo
+.turbo/
+
+# Local data and caches
+.cache/
+.tmp/
+tmp/
