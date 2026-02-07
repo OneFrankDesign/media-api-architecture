@@ -18,3 +18,8 @@ uuid.workspace = true
 [build-dependencies]
 protoc-bin-vendored.workspace = true
 tonic-build.workspace = true
+
+[dev-dependencies]
+prost-types.workspace = true
+tokio.workspace = true
+tonic.workspace = true

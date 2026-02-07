@@ -19,6 +19,22 @@ static_resources:
                       domains: ["*"]
                       routes:
                         - match:
+                            path: "/auth/session"
+                          route:
+                            cluster: auth_api
+                          typed_per_filter_config:
+                            envoy.filters.http.ext_authz:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                              disabled: true
+                        - match:
+                            path: "/auth/logout"
+                          route:
+                            cluster: auth_api
+                          typed_per_filter_config:
+                            envoy.filters.http.ext_authz:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                              disabled: true
+                        - match:
                             prefix: "/auth"
                           route:
                             cluster: auth_api
@@ -109,7 +125,9 @@ static_resources:
                         - match:
                             prefix: "/health"
                         - match:
-                            prefix: "/auth"
+                            path: "/auth/session"
+                        - match:
+                            path: "/auth/logout"
                         - match:
                             prefix: "/"
                           requires:

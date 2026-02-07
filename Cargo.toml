@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "services/main-api",
   "services/auth-api",
+  "tests/e2e-harness",
 ]
 
 [workspace.package]
