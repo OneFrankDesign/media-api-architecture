@@ -1,6 +1,8 @@
 services:
   envoy:
-    image: envoyproxy/envoy:v1.30-latest
+    build:
+      context: ../..
+      dockerfile: apps/gateway-envoy/Dockerfile
     container_name: media-envoy
     ports:
       - "${ENVOY_HTTP_PORT:-8080}:8080"
@@ -15,7 +17,7 @@ services:
       opa:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:9901/ready"]
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:9901/ready"]
       interval: 10s
       timeout: 5s
       retries: 10

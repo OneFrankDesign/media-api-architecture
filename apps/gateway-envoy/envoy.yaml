@@ -31,6 +31,9 @@ static_resources:
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
                       inline_code: |
+                        function envoy_on_request(request_handle)
+                        end
+
                         function envoy_on_response(response_handle)
                           response_handle:headers():add("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'; base-uri 'self';")
                           response_handle:headers():add("X-Content-Type-Options", "nosniff")
@@ -85,6 +88,9 @@ static_resources:
                               return
                             end
                           end
+                        end
+
+                        function envoy_on_response(response_handle)
                         end
 
                   - name: envoy.filters.http.jwt_authn
