@@ -1,4 +1,4 @@
-FROM envoyproxy/envoy:v1.30-latest
+FROM envoyproxy/envoy:v1.30.11
 
 USER root
 RUN apt-get update \

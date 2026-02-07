@@ -3,8 +3,20 @@ use reqwest::{header, Client, StatusCode};
 use serde_json::json;
 use tokio::time::{sleep, Duration};
 
+const CLIENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const READINESS_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+
 fn env_or_default(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn build_test_client() -> Result<Client> {
+    Client::builder()
+        .connect_timeout(CLIENT_CONNECT_TIMEOUT)
+        .timeout(CLIENT_REQUEST_TIMEOUT)
+        .build()
+        .context("client should build")
 }
 
 fn set_cookie_headers(response: &reqwest::Response) -> Vec<String> {
@@ -31,21 +43,30 @@ fn cookie_value_from_set_cookie(set_cookie: &[String], cookie_name: &str) -> Opt
 
 async fn wait_for_ok(client: &Client, url: &str) -> Result<()> {
     let mut last_status: Option<StatusCode> = None;
+    let mut last_error: Option<String> = None;
 
     for _ in 0..120 {
-        match client.get(url).send().await {
+        match client
+            .get(url)
+            .timeout(READINESS_REQUEST_TIMEOUT)
+            .send()
+            .await
+        {
             Ok(response) if response.status().is_success() => return Ok(()),
             Ok(response) => {
                 last_status = Some(response.status());
+                last_error = None;
             }
-            Err(_) => {}
+            Err(error) => {
+                last_error = Some(error.to_string());
+            }
         }
 
         sleep(Duration::from_millis(1000)).await;
     }
 
     Err(anyhow!(
-        "timed out waiting for readiness at {url}; last status: {last_status:?}"
+        "timed out waiting for readiness at {url}; last status: {last_status:?}; last error: {last_error:?}"
     ))
 }
 
@@ -71,7 +92,7 @@ async fn wait_for_stack(client: &Client) -> Result<()> {
 
 #[tokio::test]
 async fn compose_services_report_healthy() -> Result<()> {
-    let client = Client::builder().build().context("client should build")?;
+    let client = build_test_client()?;
     wait_for_stack(&client).await?;
 
     let auth_port = env_or_default("AUTH_API_PORT", "8081");
@@ -96,7 +117,7 @@ async fn compose_services_report_healthy() -> Result<()> {
 
 #[tokio::test]
 async fn gateway_auth_session_and_logout_flow_succeeds_with_valid_origin_and_csrf() -> Result<()> {
-    let client = Client::builder().build().context("client should build")?;
+    let client = build_test_client()?;
     wait_for_stack(&client).await?;
 
     let gateway_port = env_or_default("ENVOY_HTTP_PORT", "8080");
@@ -146,7 +167,7 @@ async fn gateway_auth_session_and_logout_flow_succeeds_with_valid_origin_and_csr
 
 #[tokio::test]
 async fn gateway_rejects_invalid_origin_and_missing_csrf() -> Result<()> {
-    let client = Client::builder().build().context("client should build")?;
+    let client = build_test_client()?;
     wait_for_stack(&client).await?;
 
     let gateway_port = env_or_default("ENVOY_HTTP_PORT", "8080");
@@ -186,7 +207,7 @@ async fn gateway_rejects_invalid_origin_and_missing_csrf() -> Result<()> {
 
 #[tokio::test]
 async fn gateway_does_not_bypass_security_for_unknown_auth_paths() -> Result<()> {
-    let client = Client::builder().build().context("client should build")?;
+    let client = build_test_client()?;
     wait_for_stack(&client).await?;
 
     let gateway_port = env_or_default("ENVOY_HTTP_PORT", "8080");

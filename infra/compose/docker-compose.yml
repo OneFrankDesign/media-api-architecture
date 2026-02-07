@@ -26,7 +26,7 @@ services:
       - backend
 
   opa:
-    image: openpolicyagent/opa:0.67.1-debug
+    image: openpolicyagent/opa:0.67.1
     container_name: media-opa
     command:
       - run
@@ -38,7 +38,13 @@ services:
     ports:
       - "${OPA_PORT:-8181}:8181"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8181/health"]
+      test:
+        - CMD
+        - /opa
+        - eval
+        - --format=raw
+        - --fail
+        - 'http.send({"method":"get","url":"http://localhost:8181/health"}).status_code = 200'
       interval: 10s
       timeout: 5s
       retries: 10
