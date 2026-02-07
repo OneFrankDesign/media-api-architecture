@@ -69,6 +69,8 @@ impl MetadataService for MetadataServiceImpl {
             updated_at: now_timestamp(),
         };
 
+        validate_metadata(&metadata)?;
+
         self.store
             .records
             .write()
@@ -113,7 +115,7 @@ impl MetadataService for MetadataServiceImpl {
         let req = request.into_inner();
 
         let page_size = normalize_page_size(req.page_size);
-        let offset = parse_page_token(&req.page_token);
+        let offset = parse_page_token(&req.page_token)?;
 
         let mut rows: Vec<VideoMetadata> = self.store.records.read().await.values().cloned().collect();
 
@@ -137,7 +139,7 @@ impl MetadataService for MetadataServiceImpl {
             });
         }
 
-        rows.sort_by_key(|row| row.created_at.as_ref().map(|ts| ts.seconds).unwrap_or_default());
+        rows.sort_by_key(sort_key);
 
         let total_count = rows.len() as i32;
         let start = offset.min(rows.len());
@@ -173,23 +175,28 @@ impl MetadataService for MetadataServiceImpl {
         let existing = guard
             .get_mut(&req.id)
             .ok_or_else(|| Status::not_found("metadata not found"))?;
+        let mut candidate = existing.clone();
 
         if let Some(mask) = req.update_mask {
             if mask.paths.is_empty() {
-                apply_patch(existing, &patch);
-            } else {
-                for path in mask.paths {
-                    apply_field(existing, &patch, &path);
-                }
+                return Err(Status::invalid_argument(
+                    "update_mask.paths must not be empty when update_mask is provided",
+                ));
+            }
+
+            for path in mask.paths {
+                apply_field(&mut candidate, &patch, &path)?;
             }
         } else {
-            apply_patch(existing, &patch);
+            apply_patch(&mut candidate, &patch);
         }
 
-        existing.updated_at = now_timestamp();
+        validate_metadata(&candidate)?;
+        candidate.updated_at = now_timestamp();
+        *existing = candidate.clone();
 
         Ok(Response::new(UpdateMetadataResponse {
-            metadata: Some(existing.clone()),
+            metadata: Some(candidate),
             from_cache: false,
         }))
     }
@@ -237,19 +244,47 @@ fn apply_patch(target: &mut VideoMetadata, patch: &VideoMetadata) {
     }
 }
 
-fn apply_field(target: &mut VideoMetadata, patch: &VideoMetadata, field: &str) {
+fn apply_field(target: &mut VideoMetadata, patch: &VideoMetadata, field: &str) -> Result<(), Status> {
     match field {
-        "title" if !patch.title.is_empty() => target.title = patch.title.clone(),
-        "description" if !patch.description.is_empty() => {
+        "title" => target.title = patch.title.clone(),
+        "description" => {
             target.description = patch.description.clone();
         }
         "tags" => target.tags = patch.tags.clone(),
-        "mime_type" if !patch.mime_type.is_empty() => target.mime_type = patch.mime_type.clone(),
-        "file_size" if patch.file_size > 0 => target.file_size = patch.file_size,
-        "owner_id" if !patch.owner_id.is_empty() => target.owner_id = patch.owner_id.clone(),
-        "visibility" if patch.visibility != 0 => target.visibility = patch.visibility,
-        _ => {}
+        "mime_type" => target.mime_type = patch.mime_type.clone(),
+        "file_size" => target.file_size = patch.file_size,
+        "owner_id" => target.owner_id = patch.owner_id.clone(),
+        "visibility" => target.visibility = patch.visibility,
+        _ => {
+            return Err(Status::invalid_argument(format!(
+                "unsupported update_mask field: {field}"
+            )))
+        }
     }
+
+    Ok(())
+}
+
+fn validate_metadata(metadata: &VideoMetadata) -> Result<(), Status> {
+    if metadata.title.trim().is_empty() {
+        return Err(Status::invalid_argument("title cannot be empty"));
+    }
+
+    if metadata.file_size < 0 {
+        return Err(Status::invalid_argument("file_size must be >= 0"));
+    }
+
+    Ok(())
+}
+
+fn sort_key(row: &VideoMetadata) -> (i64, i32, String) {
+    let (seconds, nanos) = row
+        .created_at
+        .as_ref()
+        .map(|ts| (ts.seconds, ts.nanos))
+        .unwrap_or((0, 0));
+
+    (seconds, nanos, row.id.clone())
 }
 
 fn now_timestamp() -> Option<Timestamp> {
@@ -271,8 +306,14 @@ fn normalize_page_size(raw: i32) -> usize {
     raw.min(100) as usize
 }
 
-fn parse_page_token(token: &str) -> usize {
-    token.parse::<usize>().unwrap_or(0)
+fn parse_page_token(token: &str) -> Result<usize, Status> {
+    if token.is_empty() {
+        return Ok(0);
+    }
+
+    token
+        .parse::<usize>()
+        .map_err(|_| Status::invalid_argument("invalid page_token: expected a numeric offset"))
 }
 
 async fn healthz() -> &'static str {
@@ -281,10 +322,6 @@ async fn healthz() -> &'static str {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    if std::env::args().any(|arg| arg == "--healthcheck") {
-        return Ok(());
-    }
-
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

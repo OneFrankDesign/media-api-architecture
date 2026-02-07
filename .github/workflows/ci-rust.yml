@@ -1,0 +1,21 @@
+name: ci-rust
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  ci-rust:
+    name: ci-rust
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo check workspace
+        run: cargo check --workspace

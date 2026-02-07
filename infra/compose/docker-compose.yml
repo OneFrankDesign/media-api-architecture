@@ -17,7 +17,7 @@ services:
       opa:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "envoy", "--version"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:9901/ready"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -55,10 +55,11 @@ services:
       - OIDC_CLIENT_ID=${OIDC_CLIENT_ID}
       - OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI}
       - COOKIE_DOMAIN=${COOKIE_DOMAIN}
+      - COOKIE_SECURE=${COOKIE_SECURE:-false}
     ports:
       - "${AUTH_API_PORT:-8081}:8081"
     healthcheck:
-      test: ["CMD", "auth-api", "--healthcheck"]
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8081/health"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -77,7 +78,7 @@ services:
     ports:
       - "${MAIN_API_GRPC_PORT:-50051}:50051"
     healthcheck:
-      test: ["CMD", "main-api", "--healthcheck"]
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:50052/healthz"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -133,7 +134,7 @@ services:
       - "9000:9000"
       - "9001:9001"
     healthcheck:
-      test: ["CMD-SHELL", "test -d /data"]
+      test: ["CMD-SHELL", "(command -v curl >/dev/null && curl -fsS http://localhost:9000/minio/health/ready >/dev/null) || (command -v wget >/dev/null && wget -qO- http://localhost:9000/minio/health/ready >/dev/null)"]
       interval: 15s
       timeout: 5s
       retries: 10
