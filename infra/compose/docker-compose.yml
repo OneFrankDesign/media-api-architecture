@@ -1,0 +1,186 @@
+version: "3.9"
+
+services:
+  envoy:
+    image: envoyproxy/envoy:v1.30-latest
+    container_name: media-envoy
+    ports:
+      - "${ENVOY_HTTP_PORT:-8080}:8080"
+      - "${ENVOY_ADMIN_PORT:-9901}:9901"
+    volumes:
+      - ../../apps/gateway-envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro
+    depends_on:
+      main-api:
+        condition: service_healthy
+      auth-api:
+        condition: service_healthy
+      opa:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9901/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - gateway
+      - backend
+
+  opa:
+    image: openpolicyagent/opa:0.67.1
+    container_name: media-opa
+    command:
+      - run
+      - --server
+      - --addr=0.0.0.0:8181
+      - /policies
+    volumes:
+      - ../../policies:/policies:ro
+    ports:
+      - "${OPA_PORT:-8181}:8181"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8181/health?bundles"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - backend
+
+  auth-api:
+    image: ghcr.io/onefrankdesign/media-auth-api:local
+    container_name: media-auth-api
+    environment:
+      - OIDC_ISSUER=${OIDC_ISSUER}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID}
+      - OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI}
+      - COOKIE_DOMAIN=${COOKIE_DOMAIN}
+    ports:
+      - "${AUTH_API_PORT:-8081}:8081"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - backend
+
+  main-api:
+    image: ghcr.io/onefrankdesign/media-main-api:local
+    container_name: media-main-api
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT}
+    ports:
+      - "${MAIN_API_GRPC_PORT:-50051}:50051"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:50052/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - backend
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: media-postgres
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=media
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d media"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - backend
+
+  redis:
+    image: redis:7-alpine
+    container_name: media-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - redis-data:/data
+    networks:
+      - backend
+
+  minio:
+    image: minio/minio:RELEASE.2025-01-20T14-49-07Z
+    container_name: media-minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - minio-data:/data
+    networks:
+      - backend
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: media-prometheus
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    networks:
+      - backend
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: media-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    networks:
+      - backend
+
+networks:
+  gateway:
+    driver: bridge
+  backend:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
+  prometheus-data:
+  grafana-data:

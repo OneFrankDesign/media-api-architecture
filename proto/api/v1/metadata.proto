@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package api.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/field_mask.proto";
+
+service MetadataService {
+  rpc Health(google.protobuf.Empty) returns (HealthResponse);
+  rpc CreateMetadata(CreateMetadataRequest) returns (MetadataResponse);
+  rpc GetMetadata(GetMetadataRequest) returns (MetadataResponse);
+  rpc ListMetadata(ListMetadataRequest) returns (ListMetadataResponse);
+  rpc UpdateMetadata(UpdateMetadataRequest) returns (MetadataResponse);
+  rpc DeleteMetadata(DeleteMetadataRequest) returns (google.protobuf.Empty);
+}
+
+message HealthResponse {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_HEALTHY = 1;
+    STATUS_DEGRADED = 2;
+    STATUS_UNHEALTHY = 3;
+  }
+
+  Status status = 1;
+  string version = 2;
+  google.protobuf.Timestamp timestamp = 3;
+}
+
+message VideoMetadata {
+  string id = 1;
+  string resource_id = 2;
+  string title = 3;
+  string description = 4;
+  repeated string tags = 5;
+  string mime_type = 6;
+  int64 file_size = 7;
+  string owner_id = 8;
+  Visibility visibility = 9;
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp updated_at = 11;
+}
+
+enum Visibility {
+  VISIBILITY_UNSPECIFIED = 0;
+  VISIBILITY_PRIVATE = 1;
+  VISIBILITY_UNLISTED = 2;
+  VISIBILITY_PUBLIC = 3;
+}
+
+message CreateMetadataRequest {
+  string title = 1;
+  string description = 2;
+  repeated string tags = 3;
+  string mime_type = 4;
+  int64 file_size = 5;
+  Visibility visibility = 6;
+}
+
+message GetMetadataRequest {
+  string id = 1;
+}
+
+message ListMetadataRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+  string filter_owner_id = 3;
+  Visibility filter_visibility = 4;
+  repeated string filter_tags = 5;
+  string search_query = 6;
+}
+
+message ListMetadataResponse {
+  repeated VideoMetadata metadata_list = 1;
+  string next_page_token = 2;
+  int32 total_count = 3;
+}
+
+message UpdateMetadataRequest {
+  string id = 1;
+  VideoMetadata metadata = 2;
+  google.protobuf.FieldMask update_mask = 3;
+}
+
+message DeleteMetadataRequest {
+  string id = 1;
+  bool permanent = 2;
+}
+
+message MetadataResponse {
+  VideoMetadata metadata = 1;
+  bool from_cache = 2;
+}

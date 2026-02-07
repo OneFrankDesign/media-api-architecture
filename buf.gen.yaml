@@ -1,0 +1,11 @@
+version: v2
+plugins:
+  - remote: buf.build/bufbuild/es
+    out: packages/sdk-ts/src/gen
+    opt:
+      - target=ts
+      - import_extension=none
+  - remote: buf.build/community/neoeinstein-prost
+    out: services/main-api/src/gen
+  - remote: buf.build/community/neoeinstein-tonic
+    out: services/main-api/src/gen

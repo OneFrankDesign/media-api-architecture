@@ -1,0 +1,30 @@
+name: ci-contract
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  ci-contract:
+    name: ci-contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Buf
+        uses: bufbuild/buf-setup-action@v1
+
+      - name: Lint protobuf contracts
+        run: buf lint
+
+      - name: Verify deterministic generation
+        run: |
+          bash scripts/gen-proto.sh
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Generated files are out of date"
+            git status --short
+            exit 1
+          fi

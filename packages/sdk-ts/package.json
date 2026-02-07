@@ -1,0 +1,16 @@
+{
+  "name": "@media-api-architecture/sdk-ts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "lint": "echo \"sdk lint placeholder\"",
+    "test": "echo \"sdk test placeholder\"",
+    "build": "echo \"sdk build placeholder\""
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.2.0"
+  }
+}
