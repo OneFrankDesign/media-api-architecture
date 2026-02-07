@@ -17,7 +17,7 @@ services:
       opa:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:9901/ready"]
+      test: ["CMD", "envoy", "--version"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -38,7 +38,7 @@ services:
     ports:
       - "${OPA_PORT:-8181}:8181"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8181/health?bundles"]
+      test: ["CMD", "opa", "version"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -46,7 +46,9 @@ services:
       - backend
 
   auth-api:
-    image: ghcr.io/onefrankdesign/media-auth-api:local
+    build:
+      context: ../..
+      dockerfile: services/auth-api/Dockerfile
     container_name: media-auth-api
     environment:
       - OIDC_ISSUER=${OIDC_ISSUER}
@@ -56,7 +58,7 @@ services:
     ports:
       - "${AUTH_API_PORT:-8081}:8081"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8081/health"]
+      test: ["CMD", "auth-api", "--healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -64,7 +66,9 @@ services:
       - backend
 
   main-api:
-    image: ghcr.io/onefrankdesign/media-main-api:local
+    build:
+      context: ../..
+      dockerfile: services/main-api/Dockerfile
     container_name: media-main-api
     environment:
       - DATABASE_URL=${DATABASE_URL}
@@ -73,7 +77,7 @@ services:
     ports:
       - "${MAIN_API_GRPC_PORT:-50051}:50051"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:50052/healthz"]
+      test: ["CMD", "main-api", "--healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -129,7 +133,7 @@ services:
       - "9000:9000"
       - "9001:9001"
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD-SHELL", "test -d /data"]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -145,6 +149,7 @@ services:
     ports:
       - "${PROMETHEUS_PORT:-9090}:9090"
     volumes:
+      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
