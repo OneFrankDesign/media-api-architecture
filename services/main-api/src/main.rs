@@ -1,9 +1,13 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
-use anyhow::Result;
+use anyhow::Result as AnyhowResult;
 use axum::{routing::get, Router};
 use prost_types::Timestamp;
-use tokio::{net::TcpListener, sync::RwLock};
+use tokio::{
+    net::TcpListener,
+    sync::{broadcast, RwLock},
+    task::JoinSet,
+};
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::{error, info};
 use uuid::Uuid;
@@ -36,9 +40,9 @@ impl MetadataService for MetadataServiceImpl {
     async fn health(
         &self,
         _request: Request<HealthRequest>,
-    ) -> Result<Response<HealthResponse>, Status> {
+    ) -> std::result::Result<Response<HealthResponse>, Status> {
         Ok(Response::new(HealthResponse {
-            status: 1,
+            status: api::v1::health_response::Status::Healthy as i32,
             version: env!("CARGO_PKG_VERSION").to_string(),
             timestamp: now_timestamp(),
         }))
@@ -47,7 +51,7 @@ impl MetadataService for MetadataServiceImpl {
     async fn create_metadata(
         &self,
         request: Request<CreateMetadataRequest>,
-    ) -> Result<Response<CreateMetadataResponse>, Status> {
+    ) -> std::result::Result<Response<CreateMetadataResponse>, Status> {
         let req = request.into_inner();
 
         if req.title.trim().is_empty() {
@@ -86,7 +90,7 @@ impl MetadataService for MetadataServiceImpl {
     async fn get_metadata(
         &self,
         request: Request<GetMetadataRequest>,
-    ) -> Result<Response<GetMetadataResponse>, Status> {
+    ) -> std::result::Result<Response<GetMetadataResponse>, Status> {
         let id = request.into_inner().id;
 
         if id.trim().is_empty() {
@@ -111,7 +115,7 @@ impl MetadataService for MetadataServiceImpl {
     async fn list_metadata(
         &self,
         request: Request<ListMetadataRequest>,
-    ) -> Result<Response<ListMetadataResponse>, Status> {
+    ) -> std::result::Result<Response<ListMetadataResponse>, Status> {
         let req = request.into_inner();
 
         let page_size = normalize_page_size(req.page_size);
@@ -160,7 +164,7 @@ impl MetadataService for MetadataServiceImpl {
     async fn update_metadata(
         &self,
         request: Request<UpdateMetadataRequest>,
-    ) -> Result<Response<UpdateMetadataResponse>, Status> {
+    ) -> std::result::Result<Response<UpdateMetadataResponse>, Status> {
         let req = request.into_inner();
 
         if req.id.trim().is_empty() {
@@ -177,18 +181,17 @@ impl MetadataService for MetadataServiceImpl {
             .ok_or_else(|| Status::not_found("metadata not found"))?;
         let mut candidate = existing.clone();
 
-        if let Some(mask) = req.update_mask {
-            if mask.paths.is_empty() {
-                return Err(Status::invalid_argument(
-                    "update_mask.paths must not be empty when update_mask is provided",
-                ));
-            }
+        let mask = req
+            .update_mask
+            .ok_or_else(|| Status::invalid_argument("update_mask is required"))?;
+        if mask.paths.is_empty() {
+            return Err(Status::invalid_argument(
+                "update_mask.paths must not be empty when update_mask is provided",
+            ));
+        }
 
-            for path in mask.paths {
-                apply_field(&mut candidate, &patch, &path)?;
-            }
-        } else {
-            apply_patch(&mut candidate, &patch);
+        for path in mask.paths {
+            apply_field(&mut candidate, &patch, &path)?;
         }
 
         validate_metadata(&candidate)?;
@@ -204,7 +207,7 @@ impl MetadataService for MetadataServiceImpl {
     async fn delete_metadata(
         &self,
         request: Request<DeleteMetadataRequest>,
-    ) -> Result<Response<DeleteMetadataResponse>, Status> {
+    ) -> std::result::Result<Response<DeleteMetadataResponse>, Status> {
         let req = request.into_inner();
 
         if req.id.trim().is_empty() {
@@ -220,31 +223,11 @@ impl MetadataService for MetadataServiceImpl {
     }
 }
 
-fn apply_patch(target: &mut VideoMetadata, patch: &VideoMetadata) {
-    if !patch.title.is_empty() {
-        target.title = patch.title.clone();
-    }
-    if !patch.description.is_empty() {
-        target.description = patch.description.clone();
-    }
-    if !patch.tags.is_empty() {
-        target.tags = patch.tags.clone();
-    }
-    if !patch.mime_type.is_empty() {
-        target.mime_type = patch.mime_type.clone();
-    }
-    if patch.file_size > 0 {
-        target.file_size = patch.file_size;
-    }
-    if !patch.owner_id.is_empty() {
-        target.owner_id = patch.owner_id.clone();
-    }
-    if patch.visibility != 0 {
-        target.visibility = patch.visibility;
-    }
-}
-
-fn apply_field(target: &mut VideoMetadata, patch: &VideoMetadata, field: &str) -> Result<(), Status> {
+fn apply_field(
+    target: &mut VideoMetadata,
+    patch: &VideoMetadata,
+    field: &str,
+) -> std::result::Result<(), Status> {
     match field {
         "title" => target.title = patch.title.clone(),
         "description" => {
@@ -265,7 +248,7 @@ fn apply_field(target: &mut VideoMetadata, patch: &VideoMetadata, field: &str) -
     Ok(())
 }
 
-fn validate_metadata(metadata: &VideoMetadata) -> Result<(), Status> {
+fn validate_metadata(metadata: &VideoMetadata) -> std::result::Result<(), Status> {
     if metadata.title.trim().is_empty() {
         return Err(Status::invalid_argument("title cannot be empty"));
     }
@@ -306,7 +289,7 @@ fn normalize_page_size(raw: i32) -> usize {
     raw.min(100) as usize
 }
 
-fn parse_page_token(token: &str) -> Result<usize, Status> {
+fn parse_page_token(token: &str) -> std::result::Result<usize, Status> {
     if token.is_empty() {
         return Ok(0);
     }
@@ -321,7 +304,7 @@ async fn healthz() -> &'static str {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> AnyhowResult<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -335,40 +318,87 @@ async fn main() -> Result<()> {
     info!(%grpc_addr, "starting gRPC server");
     info!(%health_addr, "starting HTTP health endpoint");
 
-    let service = MetadataServiceImpl::default();
-    let grpc_server = async move {
-        Server::builder()
-            .add_service(MetadataServiceServer::new(service))
-            .serve(grpc_addr)
-            .await
-            .map_err(anyhow::Error::from)
-    };
+    let (shutdown_tx, _) = broadcast::channel::<()>(1);
+    let mut tasks = JoinSet::new();
 
-    let health_server = async move {
-        let app = Router::new().route("/healthz", get(healthz));
-        let listener = TcpListener::bind(health_addr).await?;
-        axum::serve(listener, app)
+    let grpc_service = MetadataServiceImpl::default();
+    let mut grpc_shutdown = shutdown_tx.subscribe();
+    tasks.spawn(async move {
+        let result = Server::builder()
+            .add_service(MetadataServiceServer::new(grpc_service))
+            .serve_with_shutdown(grpc_addr, async move {
+                let _ = grpc_shutdown.recv().await;
+            })
             .await
-            .map_err(anyhow::Error::from)
-    };
+            .map_err(anyhow::Error::from);
+        ("gRPC", result)
+    });
 
+    let mut health_shutdown = shutdown_tx.subscribe();
+    tasks.spawn(async move {
+        let result: AnyhowResult<()> = async move {
+            let app = Router::new().route("/healthz", get(healthz));
+            let listener = TcpListener::bind(health_addr)
+                .await
+                .map_err(anyhow::Error::from)?;
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = health_shutdown.recv().await;
+                })
+                .await
+                .map_err(anyhow::Error::from)?;
+            Ok(())
+        }
+        .await;
+        ("health", result)
+    });
+
+    let mut first_error: Option<anyhow::Error> = None;
     tokio::select! {
-        result = grpc_server => {
-            if let Err(err) = result {
-                error!(error = %err, "gRPC server exited with error");
-                return Err(err);
-            }
-        }
-        result = health_server => {
-            if let Err(err) = result {
-                error!(error = %err, "health server exited with error");
-                return Err(err);
-            }
-        }
         _ = tokio::signal::ctrl_c() => {
             info!("shutdown signal received");
         }
+        joined = tasks.join_next() => {
+            if let Some(joined) = joined {
+                if let Some(err) = observe_server_exit(joined) {
+                    first_error = Some(err);
+                }
+            }
+        }
+    }
+
+    let _ = shutdown_tx.send(());
+    while let Some(joined) = tasks.join_next().await {
+        if let Some(err) = observe_server_exit(joined) {
+            if first_error.is_none() {
+                first_error = Some(err);
+            }
+        }
+    }
+
+    info!("shutdown complete");
+    if let Some(err) = first_error {
+        return Err(err);
     }
 
     Ok(())
+}
+
+fn observe_server_exit(
+    joined: std::result::Result<(&'static str, AnyhowResult<()>), tokio::task::JoinError>,
+) -> Option<anyhow::Error> {
+    match joined {
+        Ok((name, Ok(()))) => {
+            info!(server = name, "server stopped");
+            None
+        }
+        Ok((name, Err(err))) => {
+            error!(server = name, error = %err, "server exited with error");
+            Some(err)
+        }
+        Err(err) => {
+            error!(error = %err, "server task panicked");
+            Some(anyhow::Error::from(err))
+        }
+    }
 }

@@ -9,8 +9,8 @@ if ! command -v buf >/dev/null 2>&1; then
   exit 1
 fi
 
-rm -rf packages/sdk-ts/src/gen services/main-api/src/gen
-mkdir -p packages/sdk-ts/src/gen services/main-api/src/gen
+rm -rf packages/sdk-ts/src/gen
+mkdir -p packages/sdk-ts/src/gen
 
 buf generate --template buf.gen.yaml
 
