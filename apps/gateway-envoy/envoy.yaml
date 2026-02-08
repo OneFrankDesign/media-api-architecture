@@ -19,6 +19,26 @@ static_resources:
                       domains: ["*"]
                       routes:
                         - match:
+                            safe_regex:
+                              google_re2: {}
+                              regex: '^/auth/session(?:\?.*)?$'
+                          route:
+                            cluster: auth_api
+                          typed_per_filter_config:
+                            envoy.filters.http.ext_authz:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                              disabled: true
+                        - match:
+                            safe_regex:
+                              google_re2: {}
+                              regex: '^/auth/logout(?:\?.*)?$'
+                          route:
+                            cluster: auth_api
+                          typed_per_filter_config:
+                            envoy.filters.http.ext_authz:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                              disabled: true
+                        - match:
                             prefix: "/auth"
                           route:
                             cluster: auth_api
@@ -30,64 +50,68 @@ static_resources:
                   - name: envoy.filters.http.lua
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-                      source_code:
-                        inline_string: |
-                          function envoy_on_response(response_handle)
-                            response_handle:headers():add("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'; base-uri 'self';")
-                            response_handle:headers():add("X-Content-Type-Options", "nosniff")
-                            response_handle:headers():add("X-Frame-Options", "DENY")
-                            response_handle:headers():add("Referrer-Policy", "strict-origin-when-cross-origin")
-                          end
+                      inline_code: |
+                        function envoy_on_request(request_handle)
+                        end
+
+                        function envoy_on_response(response_handle)
+                          response_handle:headers():add("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'; base-uri 'self';")
+                          response_handle:headers():add("X-Content-Type-Options", "nosniff")
+                          response_handle:headers():add("X-Frame-Options", "DENY")
+                          response_handle:headers():add("Referrer-Policy", "strict-origin-when-cross-origin")
+                        end
 
                   - name: envoy.filters.http.lua
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-                      source_code:
-                        inline_string: |
-                          local allowed = {
-                            ["http://localhost:3000"] = true,
-                            ["https://app.localhost"] = true
-                          }
+                      inline_code: |
+                        local allowed = {
+                          ["http://localhost:3000"] = true,
+                          ["https://app.localhost"] = true
+                        }
 
-                          function envoy_on_request(request_handle)
-                            local method = request_handle:headers():get(":method")
-                            if method == "OPTIONS" then
+                        function envoy_on_request(request_handle)
+                          local method = request_handle:headers():get(":method")
+                          if method == "OPTIONS" then
+                            return
+                          end
+
+                          local sec_fetch_site = request_handle:headers():get("sec-fetch-site")
+                          local sec_fetch_mode = request_handle:headers():get("sec-fetch-mode")
+                          if sec_fetch_site == "cross-site" and sec_fetch_mode == "navigate" then
+                            request_handle:respond({[":status"] = "403"}, "cross-site navigation blocked")
+                            return
+                          end
+
+                          if method ~= "GET" and method ~= "HEAD" then
+                            local origin = request_handle:headers():get("origin")
+                            if not origin or not allowed[origin] then
+                              request_handle:respond({[":status"] = "403"}, "invalid origin")
                               return
                             end
 
-                            local sec_fetch_site = request_handle:headers():get("sec-fetch-site")
-                            local sec_fetch_mode = request_handle:headers():get("sec-fetch-mode")
-                            if sec_fetch_site == "cross-site" and sec_fetch_mode == "navigate" then
-                              request_handle:respond({[":status"] = "403"}, "cross-site navigation blocked")
-                              return
-                            end
-
-                            if method ~= "GET" and method ~= "HEAD" then
-                              local origin = request_handle:headers():get("origin")
-                              if not origin or not allowed[origin] then
-                                request_handle:respond({[":status"] = "403"}, "invalid origin")
-                                return
-                              end
-
-                              local csrf_header = request_handle:headers():get("x-csrf-token")
-                              local cookie_header = request_handle:headers():get("cookie")
-                              local csrf_cookie = nil
-                              if cookie_header then
-                                for cookie in string.gmatch(cookie_header, "([^;]+)") do
-                                  local name, value = string.match(cookie, "^%s*(.-)=(.+)$")
-                                  if name and string.match(name, "^%s*csrf%-token%s*$") then
-                                    csrf_cookie = value
-                                    break
-                                  end
+                            local csrf_header = request_handle:headers():get("x-csrf-token")
+                            local cookie_header = request_handle:headers():get("cookie")
+                            local csrf_cookie = nil
+                            if cookie_header then
+                              for cookie in string.gmatch(cookie_header, "([^;]+)") do
+                                local name, value = string.match(cookie, "^%s*(.-)=(.+)$")
+                                if name and string.match(name, "^%s*csrf%-token%s*$") then
+                                  csrf_cookie = value
+                                  break
                                 end
                               end
+                            end
 
-                              if not csrf_header or not csrf_cookie or csrf_header ~= csrf_cookie then
-                                request_handle:respond({[":status"] = "403"}, "csrf token mismatch")
-                                return
-                              end
+                            if not csrf_header or not csrf_cookie or csrf_header ~= csrf_cookie then
+                              request_handle:respond({[":status"] = "403"}, "csrf token mismatch")
+                              return
                             end
                           end
+                        end
+
+                        function envoy_on_response(response_handle)
+                        end
 
                   - name: envoy.filters.http.jwt_authn
                     typed_config:
@@ -105,7 +129,13 @@ static_resources:
                         - match:
                             prefix: "/health"
                         - match:
-                            prefix: "/auth"
+                            safe_regex:
+                              google_re2: {}
+                              regex: '^/auth/session(?:\?.*)?$'
+                        - match:
+                            safe_regex:
+                              google_re2: {}
+                              regex: '^/auth/logout(?:\?.*)?$'
                         - match:
                             prefix: "/"
                           requires:

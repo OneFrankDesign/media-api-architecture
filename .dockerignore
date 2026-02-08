@@ -1,0 +1,15 @@
+.git
+target
+node_modules
+**/node_modules
+.pnpm-store
+.turbo
+.DS_Store
+.env
+.env.*
+coverage
+dist
+tmp
+.claude*
+.codex*
+AGENTS.md

@@ -1,0 +1,21 @@
+{
+  "environment": "production",
+  "current": {
+    "sha": "replace-with-current-deployed-git-sha",
+    "released_at": "1970-01-01T00:00:00Z",
+    "images": {
+      "auth-api": "ghcr.io/<org>/media-api-auth-api:replace-with-current-deployed-git-sha",
+      "main-api": "ghcr.io/<org>/media-api-main-api:replace-with-current-deployed-git-sha",
+      "gateway-envoy": "ghcr.io/<org>/media-api-gateway-envoy:replace-with-current-deployed-git-sha"
+    }
+  },
+  "previous": {
+    "sha": "replace-with-previous-deployed-git-sha",
+    "released_at": "1970-01-01T00:00:00Z",
+    "images": {
+      "auth-api": "ghcr.io/<org>/media-api-auth-api:replace-with-previous-deployed-git-sha",
+      "main-api": "ghcr.io/<org>/media-api-main-api:replace-with-previous-deployed-git-sha",
+      "gateway-envoy": "ghcr.io/<org>/media-api-gateway-envoy:replace-with-previous-deployed-git-sha"
+    }
+  }
+}

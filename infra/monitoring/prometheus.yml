@@ -1,0 +1,17 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["prometheus:9090"]
+
+  - job_name: envoy-admin
+    metrics_path: /stats/prometheus
+    static_configs:
+      - targets: ["envoy:9901"]
+
+  - job_name: opa
+    static_configs:
+      - targets: ["opa:8181"]

@@ -1,0 +1,81 @@
+name: rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_sha:
+        description: "Git SHA to roll back to"
+        required: true
+        type: string
+      previous_sha:
+        description: "Current deployed SHA before rollback (optional)"
+        required: false
+        type: string
+      incident_outcome:
+        description: "Incident outcome after rollback"
+        required: true
+        default: mitigated
+        type: choice
+        options:
+          - mitigated
+          - partially_mitigated
+          - not_mitigated
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  rollback:
+    name: rollback
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate target SHA
+        run: |
+          if ! [[ "${{ inputs.target_sha }}" =~ ^[0-9a-f]{7,40}$ ]]; then
+            echo "target_sha must be a 7-40 lowercase hex git SHA" >&2
+            exit 1
+          fi
+
+      - name: Normalize GHCR owner
+        id: owner
+        run: echo "value=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate rollback metadata
+        run: |
+          bash scripts/generate-deployment-metadata.sh \
+            "${{ inputs.target_sha }}" \
+            "${{ inputs.previous_sha }}" \
+            "${{ steps.owner.outputs.value }}" \
+            "infra/releases/rollback-metadata.generated.json"
+
+      - name: Rollback command summary
+        run: |
+          {
+            echo "## Rollback Plan"
+            echo ""
+            echo "- target sha: \\`${{ inputs.target_sha }}\\`"
+            echo "- previous sha: \\`${{ inputs.previous_sha }}\\`"
+            echo "- incident outcome: \\`${{ inputs.incident_outcome }}\\`"
+            echo ""
+            echo "### Immutable image tags"
+            echo "- ghcr.io/${{ steps.owner.outputs.value }}/media-api-auth-api:${{ inputs.target_sha }}"
+            echo "- ghcr.io/${{ steps.owner.outputs.value }}/media-api-main-api:${{ inputs.target_sha }}"
+            echo "- ghcr.io/${{ steps.owner.outputs.value }}/media-api-gateway-envoy:${{ inputs.target_sha }}"
+            echo ""
+            echo "### Verify health after deploy"
+            echo "- \\`curl --fail --silent http://<auth-host>:8081/health\\`"
+            echo "- \\`curl --fail --silent http://<main-host>:50052/healthz\\`"
+            echo "- \\`curl --fail --silent http://<envoy-admin-host>:9901/ready\\`"
+            echo ""
+            echo "Update \\`infra/releases/deployment-metadata.json\\` after rollback confirmation."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload rollback metadata artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rollback-metadata-${{ inputs.target_sha }}
+          path: infra/releases/rollback-metadata.generated.json

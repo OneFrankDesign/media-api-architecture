@@ -1,0 +1,93 @@
+name: release-images
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      previous_sha:
+        description: "Previously deployed git SHA (optional)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    name: build-and-push
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: auth-api
+            dockerfile: services/auth-api/Dockerfile
+          - image: main-api
+            dockerfile: services/main-api/Dockerfile
+          - image: gateway-envoy
+            dockerfile: apps/gateway-envoy/Dockerfile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Normalize GHCR owner
+        id: owner
+        run: echo "value=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ghcr.io/${{ steps.owner.outputs.value }}/media-api-${{ matrix.image }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+  release-metadata:
+    name: release-metadata
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Normalize GHCR owner
+        id: owner
+        run: echo "value=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve previous SHA
+        id: previous
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "value=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ inputs.previous_sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build deployment metadata
+        run: |
+          bash scripts/generate-deployment-metadata.sh \
+            "${{ github.sha }}" \
+            "${{ steps.previous.outputs.value }}" \
+            "${{ steps.owner.outputs.value }}" \
+            "infra/releases/deployment-metadata.generated.json"
+
+      - name: Upload deployment metadata artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-metadata-${{ github.sha }}
+          path: infra/releases/deployment-metadata.generated.json

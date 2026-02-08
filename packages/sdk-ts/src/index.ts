@@ -21,11 +21,11 @@ export class MediaApiSdk {
 
   private metadata(): RequestMetadata {
     const headers: RequestMetadata = {
-      Authorization: `Bearer ${this.auth.accessToken}`,
+      authorization: `Bearer ${this.auth.accessToken}`,
     };
 
     if (this.auth.csrfToken) {
-      headers["X-CSRF-Token"] = this.auth.csrfToken;
+      headers["x-csrf-token"] = this.auth.csrfToken;
     }
 
     return headers;

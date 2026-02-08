@@ -43,3 +43,8 @@ Thumbs.db
 .cache/
 .tmp/
 tmp/
+
+# AI assistant context
+.claude/
+.codex/
+AGENTS.md
