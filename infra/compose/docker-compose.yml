@@ -26,7 +26,7 @@ services:
       - backend
 
   opa:
-    image: openpolicyagent/opa:0.67.1
+    image: openpolicyagent/opa:0.67.1-static@sha256:1ad58c1c8130ba790302b6ff0306535cf25ba4f1019e1a79a9e14d35d2d1a4cd
     container_name: media-opa
     command:
       - run
