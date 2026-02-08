@@ -45,6 +45,7 @@ Thumbs.db
 tmp/
 repro_input.json
 docs/health_report.md
+results.sarif
 
 # AI assistant context
 .claude/
