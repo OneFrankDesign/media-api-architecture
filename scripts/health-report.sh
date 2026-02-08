@@ -123,7 +123,7 @@ append_report_header() {
 }
 
 run_preflight() {
-  run_command_step "Preflight" "command -v bash && command -v docker && command -v pnpm && command -v curl && command -v jq" 1
+  run_command_step "Preflight" "command -v bash && command -v docker && command -v pnpm && command -v curl && command -v jq && command -v envsubst" 1
 }
 
 run_compose_render_and_validate() {

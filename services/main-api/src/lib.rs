@@ -90,6 +90,7 @@ struct JwtPayloadClaims {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct LegacyCursorPayload {
     last_created_at_seconds: i64,
     last_created_at_nanos: i32,
@@ -102,6 +103,7 @@ struct LegacyCursorPayload {
 #[serde(untagged)]
 enum DecodedCursorPayload {
     Current(CursorPayload),
+    #[allow(dead_code)]
     Legacy(LegacyCursorPayload),
 }
 
@@ -617,7 +619,7 @@ pub fn parse_page_token(token: &str) -> std::result::Result<usize, Status> {
 pub fn classify_page_token(
     token: &str,
     secret: &[u8],
-    cursor_ttl_secs: u64,
+    _cursor_ttl_secs: u64,
 ) -> std::result::Result<PageTokenKind, Status> {
     if token.is_empty() {
         return Ok(PageTokenKind::Empty);
@@ -628,7 +630,7 @@ pub fn classify_page_token(
         return parse_page_token(token).map(PageTokenKind::Offset);
     }
 
-    decode_cursor_with_ttl(token, secret, cursor_ttl_secs).map(PageTokenKind::Cursor)
+    decode_cursor_with_ttl(token, secret, _cursor_ttl_secs).map(PageTokenKind::Cursor)
 }
 
 pub fn parse_page_token_kind(
@@ -698,7 +700,11 @@ pub fn compute_filter_hash(req: &ListMetadataRequest, requester_sub: &str, secre
     mac.update(&[0]);
     mac.update(&req.filter_visibility.to_be_bytes());
     mac.update(&[0]);
-    for tag in &req.filter_tags {
+    // Canonicalize tags to avoid cursor invalidation when callers reorder identical filters.
+    let mut canonical_tags: Vec<&str> = req.filter_tags.iter().map(String::as_str).collect();
+    canonical_tags.sort_unstable();
+    canonical_tags.dedup();
+    for tag in canonical_tags {
         mac.update(tag.as_bytes());
         mac.update(&[0]);
     }
@@ -792,7 +798,7 @@ pub fn decode_cursor(token: &str, secret: &[u8]) -> std::result::Result<CursorPa
 pub fn decode_cursor_with_ttl(
     token: &str,
     secret: &[u8],
-    cursor_ttl_secs: u64,
+    _cursor_ttl_secs: u64,
 ) -> std::result::Result<CursorPayload, Status> {
     let (encoded_payload, encoded_signature) = token
         .split_once('.')
@@ -816,16 +822,11 @@ pub fn decode_cursor_with_ttl(
         .map_err(|_| Status::invalid_argument("invalid cursor payload"))?
     {
         DecodedCursorPayload::Current(payload) => payload,
-        DecodedCursorPayload::Legacy(legacy) => {
-            warn!("received legacy cursor payload without exp_unix; applying default ttl");
-            CursorPayload {
-                last_created_at_seconds: legacy.last_created_at_seconds,
-                last_created_at_nanos: legacy.last_created_at_nanos,
-                last_id: legacy.last_id,
-                sort_direction: legacy.sort_direction,
-                filter_hash: legacy.filter_hash,
-                exp_unix: unix_now().saturating_add(cursor_ttl_secs as i64),
-            }
+        DecodedCursorPayload::Legacy(_) => {
+            warn!("received legacy cursor payload without exp_unix; rejecting token");
+            return Err(Status::invalid_argument(
+                "legacy cursor token is no longer supported; restart pagination",
+            ));
         }
     };
     if payload.exp_unix < unix_now() {
@@ -1365,6 +1366,31 @@ mod tests {
     }
 
     #[test]
+    fn decode_cursor_rejects_legacy_payloads_without_expiry() {
+        let legacy_payload = URL_SAFE_NO_PAD.encode(
+            r#"{
+              "last_created_at_seconds": 1,
+              "last_created_at_nanos": 0,
+              "last_id": "legacy-id",
+              "sort_direction": "asc",
+              "filter_hash": 7
+            }"#,
+        );
+        let mut mac = HmacSha256::new_from_slice(b"secret-a").expect("hmac should construct");
+        mac.update(legacy_payload.as_bytes());
+        let signature = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        let token = format!("{legacy_payload}.{signature}");
+
+        let err = decode_cursor_with_ttl(&token, b"secret-a", DEFAULT_CURSOR_TTL_SECS)
+            .expect_err("legacy cursor payload should be rejected");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            err.message(),
+            "legacy cursor token is no longer supported; restart pagination"
+        );
+    }
+
+    #[test]
     fn cursor_secret_from_env_uses_debug_fallback_when_enabled() {
         let secret = cursor_secret_from_env(None, true).expect("debug fallback should be allowed");
         assert_eq!(secret, DEFAULT_CURSOR_SECRET.as_bytes());
@@ -1395,6 +1421,32 @@ mod tests {
         let first = compute_filter_hash(&req, "user-a", secret);
         let second = compute_filter_hash(&req, "user-b", secret);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn compute_filter_hash_canonicalizes_filter_tags() {
+        let req_a = ListMetadataRequest {
+            page_size: 20,
+            page_token: String::new(),
+            filter_owner_id: "owner-1".to_string(),
+            filter_visibility: 0,
+            filter_tags: vec![
+                "tag-b".to_string(),
+                "tag-a".to_string(),
+                "tag-b".to_string(),
+            ],
+            search_query: "needle".to_string(),
+            sort_direction: 0,
+        };
+        let req_b = ListMetadataRequest {
+            filter_tags: vec!["tag-a".to_string(), "tag-b".to_string()],
+            ..req_a.clone()
+        };
+        let secret = b"cursor-secret";
+
+        let hash_a = compute_filter_hash(&req_a, "user-a", secret);
+        let hash_b = compute_filter_hash(&req_b, "user-a", secret);
+        assert_eq!(hash_a, hash_b);
     }
 
     #[test]
