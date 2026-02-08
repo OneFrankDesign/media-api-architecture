@@ -19,7 +19,9 @@ static_resources:
                       domains: ["*"]
                       routes:
                         - match:
-                            path: "/auth/session"
+                            safe_regex:
+                              google_re2: {}
+                              regex: '^/auth/session(?:\?.*)?$'
                           route:
                             cluster: auth_api
                           typed_per_filter_config:
@@ -27,7 +29,9 @@ static_resources:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
                               disabled: true
                         - match:
-                            path: "/auth/logout"
+                            safe_regex:
+                              google_re2: {}
+                              regex: '^/auth/logout(?:\?.*)?$'
                           route:
                             cluster: auth_api
                           typed_per_filter_config:
@@ -125,9 +129,13 @@ static_resources:
                         - match:
                             prefix: "/health"
                         - match:
-                            path: "/auth/session"
+                            safe_regex:
+                              google_re2: {}
+                              regex: '^/auth/session(?:\?.*)?$'
                         - match:
-                            path: "/auth/logout"
+                            safe_regex:
+                              google_re2: {}
+                              regex: '^/auth/logout(?:\?.*)?$'
                         - match:
                             prefix: "/"
                           requires:
