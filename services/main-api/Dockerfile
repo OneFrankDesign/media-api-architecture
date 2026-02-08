@@ -25,9 +25,12 @@ RUN cargo build --release -p main-api
 FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 appuser \
+    && useradd --system --uid 10001 --gid appuser --create-home --home-dir /home/appuser --shell /usr/sbin/nologin appuser
 
-COPY --from=builder /app/target/release/main-api /usr/local/bin/main-api
+COPY --from=builder --chown=appuser:appuser /app/target/release/main-api /usr/local/bin/main-api
 
 EXPOSE 50051 50052
+USER appuser:appuser
 CMD ["main-api"]
