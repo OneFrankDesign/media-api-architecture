@@ -13,9 +13,10 @@
     "test:all": "pnpm test:unit && pnpm test:integration && pnpm test:e2e",
     "build": "turbo run build",
     "verify": "pnpm lint && pnpm test:all && pnpm build",
-    "compose:up": "docker compose -f infra/compose/docker-compose.yml --env-file .env.example up -d --build",
+    "compose:up": "bash scripts/render-envoy-config.sh && docker compose -f infra/compose/docker-compose.yml --env-file .env.example up -d --build",
     "compose:down": "docker compose -f infra/compose/docker-compose.yml --env-file .env.example down",
-    "smoke": "docker compose -f infra/compose/docker-compose.yml config >/dev/null"
+    "smoke": "bash scripts/render-envoy-config.sh && docker compose -f infra/compose/docker-compose.yml --env-file .env.example config >/dev/null",
+    "health:report": "bash scripts/health-report.sh"
   },
   "devDependencies": {
     "turbo": "^2.3.3"

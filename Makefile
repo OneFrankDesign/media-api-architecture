@@ -1,4 +1,4 @@
-.PHONY: gen lint test test-unit test-integration test-e2e test-all verify build compose-up compose-down smoke
+.PHONY: gen lint test test-unit test-integration test-e2e test-all verify build compose-up compose-down smoke health-report
 
 gen:
 	bash scripts/gen-proto.sh
@@ -35,3 +35,6 @@ compose-down:
 
 smoke:
 	docker compose -f infra/compose/docker-compose.yml config >/dev/null
+
+health-report:
+	pnpm health:report

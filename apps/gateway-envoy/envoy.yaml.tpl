@@ -97,8 +97,8 @@ static_resources:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
                       inline_code: |
                         local allowed = {
-                          ["http://localhost:3000"] = true,
-                          ["https://app.localhost"] = true
+                          ["${CORS_ALLOWED_ORIGIN_PRIMARY}"] = true,
+                          ["${CORS_ALLOWED_ORIGIN_SECONDARY}"] = true
                         }
 
                         local function trim(value)
@@ -167,12 +167,12 @@ static_resources:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
                       providers:
                         oidc:
-                          issuer: "http://oidc-mock:80"
-                          audiences: ["media-api-client"]
+                          issuer: "${OIDC_ISSUER}"
+                          audiences: ["${OIDC_AUDIENCE}"]
                           forward_payload_header: x-jwt-payload
                           remote_jwks:
                             http_uri:
-                              uri: "http://oidc-mock:80/.well-known/openid-configuration/jwks"
+                              uri: "${OIDC_JWKS_URI}"
                               cluster: oidc_jwks
                               timeout: 5s
                       rules:
@@ -328,8 +328,8 @@ static_resources:
               - endpoint:
                   address:
                     socket_address:
-                      address: oidc-mock
-                      port_value: 80
+                      address: ${OIDC_JWKS_HOST}
+                      port_value: ${OIDC_JWKS_PORT}
 
 admin:
   access_log_path: /tmp/admin_access.log

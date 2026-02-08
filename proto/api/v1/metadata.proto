@@ -50,6 +50,12 @@ enum Visibility {
   VISIBILITY_PUBLIC = 3;
 }
 
+enum SortDirection {
+  SORT_DIRECTION_UNSPECIFIED = 0;
+  SORT_DIRECTION_ASC = 1;
+  SORT_DIRECTION_DESC = 2;
+}
+
 message CreateMetadataRequest {
   string title = 1;
   string description = 2;
@@ -70,12 +76,15 @@ message ListMetadataRequest {
   Visibility filter_visibility = 4;
   repeated string filter_tags = 5;
   string search_query = 6;
+  SortDirection sort_direction = 7;
 }
 
 message ListMetadataResponse {
   repeated VideoMetadata metadata_list = 1;
   string next_page_token = 2;
+  // Exact filtered count on first page, estimated remaining count for cursor pages.
   int32 total_count = 3;
+  bool has_exact_count = 4;
 }
 
 message UpdateMetadataRequest {

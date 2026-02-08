@@ -1,4 +1,4 @@
-FROM rust:1.84-bookworm AS chef
+FROM rust:1.93-bookworm AS chef
 WORKDIR /app
 RUN cargo install --locked cargo-chef
 
@@ -19,6 +19,13 @@ COPY --from=cacher /usr/local/cargo /usr/local/cargo
 RUN cargo build --release -p auth-api
 
 FROM debian:bookworm-slim
+ARG VCS_REF=unknown
+ARG VCS_URL=https://github.com/media-api/media-api-architecture
+LABEL org.opencontainers.image.title="media-api-auth-api" \
+      org.opencontainers.image.description="Media API auth service" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.source="${VCS_URL}"
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \

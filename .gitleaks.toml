@@ -1,0 +1,32 @@
+title = "Media API gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Allow documented example-only env template secrets"
+paths = [
+  '''^\.env\.example$''',
+]
+regexTarget = "line"
+regexes = [
+  '''^AUTH_CHALLENGE_SECRET=.*$''',
+  '''^CURSOR_SECRET=.*$''',
+]
+fingerprints = [
+  '''f41a42aedd3775a6441805bd95d36b5e6848ecba:.env.example:generic-api-key:24''',
+  '''f41a42aedd3775a6441805bd95d36b5e6848ecba:.env.example:generic-api-key:27''',
+]
+
+[[allowlists]]
+description = "Allow test fixture private key constant in auth-api integration tests"
+paths = [
+  '''^services/auth-api/tests/auth_api_integration\.rs$''',
+]
+regexTarget = "line"
+regexes = [
+  '''TEST_RSA_PRIVATE_KEY_PEM''',
+]
+fingerprints = [
+  '''34b124368ff36548252dfd69105d84d6dfc5ae7c:services/auth-api/tests/auth_api_integration.rs:private-key:453''',
+]
