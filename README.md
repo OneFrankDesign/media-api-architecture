@@ -1,123 +1,111 @@
 # media-api-architecture
 
-A local-first, security-focused monorepo for a high-performance Media API architecture.
+Security-first Rust monorepo for a media metadata platform behind an Envoy gateway.
 
-## Scope
+## Current Stage
 
-This repository is being bootstrapped to implement a Rust + gRPC media metadata platform with Envoy gateway security controls, OPA authorization, and TypeScript SDK support.
+Phase 1 foundation + hardening is in place:
 
-## Architecture Intent
+- gateway defense-in-depth chain is active (security headers, origin/CORS checks, CSRF, JWT, OPA, gRPC-Web, router)
+- ingress now strips `x-jwt-payload`; only `jwt_authn` can forward it downstream
+- OPA metadata authorization requires decoded forwarded claims with non-empty `sub`
+- main-api cursor tokens are HMAC signed, expiring, and verified with constant-time signature checks
+- release builds now fail fast when `CURSOR_SECRET` is missing (debug builds keep a warned fallback)
+- auth-api exposes `/metrics`, and Prometheus scrapes both auth-api and main-api
 
-The system is designed around defense in depth at the gateway layer:
-- strict security headers and request validation
-- JWT authentication and policy authorization
-- gRPC-Web to gRPC translation for web clients
+## Services
 
-## Testing Strategy (TDD-First)
+- `services/main-api` (gRPC `MetadataService`)
+  - gRPC: `50051`
+  - health/metrics: `50052` (`/healthz`, `/metrics`)
+  - in-memory `DashMap` store with owner/visibility indexes
+- `services/auth-api` (Axum HTTP auth/session)
+  - HTTP: `8081`
+  - endpoints: `/health`, `/metrics`, `/auth/login`, `/auth/callback`
+  - deprecated but supported: `/auth/session`, `/auth/logout` (with deprecation + sunset headers)
+- `apps/gateway-envoy`
+  - ingress/API gateway and security enforcement point
 
-This repository follows a strict test pyramid:
-- unit tests: pure function and component behavior
-- integration tests: service-level contracts and API semantics
-- e2e tests: compose-backed cross-service behavior through real network boundaries
+## Local Configuration
 
-Hard rule for all feature work:
-1. write/adjust the failing test first
-2. implement the minimal change to pass
-3. refactor without behavior changes
+Start from `.env.example`.
 
-## Local Developer Workflow
+Notable variables:
 
-Core commands:
-- `pnpm test:unit`: Rust unit tests + SDK unit tests
-- `pnpm test:integration`: Rust service integration tests
-- `pnpm test:e2e`: compose-backed end-to-end test harness
-- `pnpm test:all`: run unit + integration + e2e
-- `pnpm verify`: lint + test:all + build
+- `CORS_ALLOWED_ORIGIN_PRIMARY`
+- `CORS_ALLOWED_ORIGIN_SECONDARY`
+- `AUTH_CHALLENGE_SECRET` (generate with `openssl rand -hex 32`)
+- `CURSOR_SECRET` (generate with `openssl rand -hex 32`)
+- OIDC values (`OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_AUDIENCE`, `OIDC_JWKS_URI`, etc.)
 
-Suggested red/green/refactor loop:
-1. run targeted test(s) and confirm failure
-2. implement minimal behavior
-3. run targeted test(s) until green
-4. run `pnpm test:integration` for touched services
-5. run `pnpm verify` before pushing
+Render Envoy config (required before compose validation/up):
 
-## CI Quality Gates
+```bash
+bash scripts/render-envoy-config.sh
+```
 
-The following checks are required before merge to `main`:
+## Development Commands
 
-| Check | Purpose | Risk prevented |
-| --- | --- | --- |
-| `ci-lint` | lint pipeline | style drift and low-signal quality regressions |
-| `ci-rust` | workspace `cargo check` | compile-time breakages |
-| `ci-contract` | buf lint + deterministic generation | API contract drift and generated artifact mismatch |
-| `ci-security` | gitleaks + dependency audit baseline | secrets exposure and known vulnerabilities |
-| `ci-compose-smoke` | compose config validation | broken local/runtime orchestration config |
-| `ci-test-unit` | unit test suite | logic regressions in isolated components |
-| `ci-test-integration` | service integration suite | contract/status/pagination/update-mask regressions |
-| `ci-test-e2e` | compose e2e flows | cross-service and gateway enforcement regressions |
+```bash
+pnpm test:unit
+pnpm test:integration
+pnpm test:e2e
+pnpm test:all
+pnpm verify
 
-Path-filter behavior:
-- `ci-test-e2e` runs for code-impacting changes.
-- docs-only/config-instruction-only changes can skip e2e execution.
+pnpm compose:up
+pnpm compose:down
+pnpm smoke
+```
 
-Branch protection policy (configure in GitHub repo settings):
-- require all checks above before merge
-- dismiss stale approvals when new commits are pushed
-- disable force-push to `main`
+## Health Report
 
-## Release and Rollback
+Use the repo-level health command for a full local stack check and report:
 
-Image tagging model:
-- immutable GHCR tags per commit SHA
-- format: `ghcr.io/<org>/media-api-<service>:<git-sha>`
+```bash
+pnpm health:report
+# or
+make health-report
+```
 
-Release workflow:
-- `.github/workflows/release-images.yml` builds and pushes:
-  - `media-api-auth-api`
-  - `media-api-main-api`
-  - `media-api-gateway-envoy`
-- release metadata artifact is generated via `scripts/generate-deployment-metadata.sh`
+This workflow:
 
-Deployment metadata contract:
-- tracked template: `infra/releases/deployment-metadata.json`
-- generated examples in workflows:
-  - `infra/releases/deployment-metadata.generated.json`
-  - `infra/releases/rollback-metadata.generated.json`
+- renders and validates Envoy/Compose config
+- performs a full clean reset (`docker compose down --volumes --remove-orphans`)
+- brings Compose up with build
+- waits for container readiness
+- runs `pnpm test:unit`, `pnpm test:integration`, and `pnpm test:e2e`
+- runs endpoint probes and Docker diagnostics
+- always tears the stack down at the end
 
-Rollback:
-1. choose previous known-good SHA from metadata
-2. run `bash scripts/rollback.sh <target_sha> <ghcr_owner>`
-3. redeploy with rollback image tags
-4. verify `/health`, `/healthz`, and Envoy `/ready`
-5. mark incident outcome and update metadata
+Output artifact:
 
-Additional runbook: `docs/runbooks/rollback.md`
+- `docs/health_report.md`
 
-## Atomic PR and Commit Rules
+Behavior guarantees:
 
-PR scope:
-- one behavior-focused change per PR
-- avoid mixed unrelated changes
+- report is overwritten on every run
+- report is generated even on failures
+- command exits non-zero when critical health steps fail
 
-Expected commit sequence:
-1. test commit (failing evidence)
-2. implementation commit (minimal pass)
-3. optional refactor commit (no behavior change)
+## Test Expectations
 
-PR template requires:
-- failing-test-first evidence
-- implementation delta
-- rollback reference
-- risk and blast radius
+- `pnpm test:unit`: Rust unit + SDK unit tests
+- `pnpm test:integration`: auth-api + main-api integration suites
+- `pnpm test:e2e`: compose-backed full-stack gateway flow checks
 
-## Definition of Done
+Security-critical coverage includes:
 
-A change is complete only when all conditions are met:
-- required CI checks are green
-- rollback steps are documented and actionable
-- contract drift checks are clean (`buf` + generated artifacts)
-- tests at appropriate layers are present for the behavior
+- malformed cursor rejection and expiry handling
+- non-owner permission denial paths
+- auth-api rate-limit `429` behavior
+- gateway gRPC rejection for missing bearer token
+- claim-aware OPA policy behavior for forwarded JWT payload
 
-## Status
+## Deferred Work
 
-Bootstrap in progress. Initial repository governance, monorepo scaffolding, infrastructure skeleton, and CI baselines are being added in staged commits.
+Tracked but intentionally not bundled in this hardening wave:
+
+- exporter rollout for postgres/redis/minio/grafana scrape targets
+- digest pinning for Prometheus/Grafana images
+- deeper handler decomposition beyond the current list/pagination refactors
