@@ -109,3 +109,35 @@ jobs:
       - name: Teardown compose stack
         if: always()
         run: docker compose -f infra/compose/docker-compose.yml down --volumes --remove-orphans
+
+  ci-test:
+    name: ci-test
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - changes
+      - ci-test-unit
+      - ci-test-integration
+      - ci-test-e2e
+    steps:
+      - name: Aggregate ci-test result
+        run: |
+          echo "changes=${{ needs.changes.result }}"
+          echo "ci-test-unit=${{ needs.ci-test-unit.result }}"
+          echo "ci-test-integration=${{ needs.ci-test-integration.result }}"
+          echo "ci-test-e2e=${{ needs.ci-test-e2e.result }}"
+
+          if [ "${{ needs.ci-test-unit.result }}" != "success" ]; then
+            echo "ci-test-unit did not succeed" >&2
+            exit 1
+          fi
+
+          if [ "${{ needs.ci-test-integration.result }}" != "success" ]; then
+            echo "ci-test-integration did not succeed" >&2
+            exit 1
+          fi
+
+          if [ "${{ needs.ci-test-e2e.result }}" = "failure" ] || [ "${{ needs.ci-test-e2e.result }}" = "cancelled" ]; then
+            echo "ci-test-e2e did not succeed" >&2
+            exit 1
+          fi
