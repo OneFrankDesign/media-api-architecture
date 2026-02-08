@@ -15,4 +15,6 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Validate compose configuration
-        run: docker compose -f infra/compose/docker-compose.yml --env-file .env.example config
+        run: |
+          ./scripts/render-envoy-config.sh
+          docker compose -f infra/compose/docker-compose.yml --env-file .env.example config

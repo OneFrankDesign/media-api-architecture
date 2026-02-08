@@ -90,7 +90,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Start compose stack
-        run: docker compose -f infra/compose/docker-compose.yml --env-file .env.example up -d --build
+        run: |
+          ./scripts/render-envoy-config.sh
+          docker compose -f infra/compose/docker-compose.yml --env-file .env.example up -d --build
 
       - name: Run e2e tests
         run: cargo test -p e2e-harness --test gateway_e2e -- --nocapture

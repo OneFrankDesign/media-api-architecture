@@ -21,6 +21,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    mem_limit: 512m
+    cpus: "1.0"
     networks:
       - gateway
       - backend
@@ -48,6 +50,49 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    mem_limit: 256m
+    cpus: "0.5"
+    networks:
+      - backend
+
+  oidc-mock:
+    image: soluto/oidc-server-mock@sha256:b11e1e98f022cd1584453d922c6949c45a14341e48ef9d848bf691d01f71b9b6
+    container_name: media-oidc-mock
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      SERVER_OPTIONS_INLINE: |
+        { "IssuerUri": "http://oidc-mock:80" }
+      CLIENTS_CONFIGURATION_INLINE: |
+        [{ "ClientId": "media-api-client",
+           "AllowedGrantTypes": ["authorization_code", "password"],
+           "RequirePkce": true,
+           "RedirectUris": ["http://localhost:8080/auth/callback"],
+           "AllowedScopes": ["openid", "profile"],
+           "ClientSecrets": ["media-api-secret"] }]
+      USERS_CONFIGURATION_INLINE: |
+        [{ "SubjectId": "test-user-1",
+           "Username": "testuser",
+           "Password": "testpass",
+           "Claims": [
+             { "Type": "name", "Value": "Test User" },
+             { "Type": "role", "Value": "admin" }
+           ] }]
+    ports:
+      - "9080:80"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "--fail",
+          "--silent",
+          "http://localhost:80/.well-known/openid-configuration",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    mem_limit: 256m
+    cpus: "0.5"
     networks:
       - backend
 
@@ -59,7 +104,11 @@ services:
     environment:
       - OIDC_ISSUER=${OIDC_ISSUER}
       - OIDC_CLIENT_ID=${OIDC_CLIENT_ID}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
       - OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI}
+      - OIDC_DISCOVERY_URL=${OIDC_DISCOVERY_URL}
+      - OIDC_DISCOVERY_TTL_SECS=${OIDC_DISCOVERY_TTL_SECS:-3600}
+      - AUTH_CHALLENGE_SECRET=${AUTH_CHALLENGE_SECRET}
       - COOKIE_DOMAIN=${COOKIE_DOMAIN}
       - COOKIE_SECURE=${COOKIE_SECURE:-false}
     ports:
@@ -69,6 +118,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    depends_on:
+      oidc-mock:
+        condition: service_healthy
+    mem_limit: 512m
+    cpus: "1.0"
     networks:
       - backend
 
@@ -81,6 +135,8 @@ services:
       - DATABASE_URL=${DATABASE_URL}
       - REDIS_URL=${REDIS_URL}
       - MINIO_ENDPOINT=${MINIO_ENDPOINT}
+      - CURSOR_SECRET=${CURSOR_SECRET}
+      - CURSOR_TTL_SECS=${CURSOR_TTL_SECS:-300}
     ports:
       - "${MAIN_API_GRPC_PORT:-50051}:50051"
       - "${MAIN_API_HEALTH_PORT:-50052}:50052"
@@ -89,6 +145,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    mem_limit: 1g
+    cpus: "1.5"
     depends_on:
       postgres:
         condition: service_healthy
@@ -113,6 +171,8 @@ services:
       retries: 10
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    mem_limit: 1g
+    cpus: "1.0"
     networks:
       - backend
 
@@ -127,6 +187,8 @@ services:
       retries: 10
     volumes:
       - redis-data:/data
+    mem_limit: 256m
+    cpus: "0.5"
     networks:
       - backend
 
@@ -147,11 +209,13 @@ services:
       retries: 10
     volumes:
       - minio-data:/data
+    mem_limit: 512m
+    cpus: "1.0"
     networks:
       - backend
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.51.0
     container_name: media-prometheus
     command: ["--config.file=/etc/prometheus/prometheus.yml"]
     ports:
@@ -164,11 +228,13 @@ services:
       interval: 15s
       timeout: 5s
       retries: 10
+    mem_limit: 512m
+    cpus: "0.5"
     networks:
       - backend
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:10.4.0
     container_name: media-grafana
     environment:
       - GF_SECURITY_ADMIN_USER=admin
@@ -182,6 +248,8 @@ services:
       interval: 15s
       timeout: 5s
       retries: 10
+    mem_limit: 512m
+    cpus: "0.5"
     networks:
       - backend
 
