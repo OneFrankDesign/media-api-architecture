@@ -23,6 +23,7 @@ jobs:
           filters: |
             code:
               - 'services/**'
+              - 'tests/**'
               - 'packages/**'
               - 'apps/**'
               - 'infra/**'
