@@ -43,6 +43,8 @@ Thumbs.db
 .cache/
 .tmp/
 tmp/
+repro_input.json
+docs/health_report.md
 
 # AI assistant context
 .claude/
