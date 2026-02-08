@@ -8,6 +8,7 @@ use std::{
 
 use auth_api::{
     build_app_with_options, sign_challenge_cookie_value, AppState, OidcConfig, RateLimitOptions,
+    DEFAULT_SESSION_MAX_AGE_SECS,
 };
 use axum::{
     body::Body,
@@ -448,6 +449,85 @@ async fn start_nonce_mismatch_oidc_server() -> Option<(String, String, JoinHandl
     Some((issuer, discovery_url, handle))
 }
 
+async fn start_callback_oidc_server(
+    token_nonce: &str,
+    access_exp: i64,
+    id_exp: i64,
+    jwks_counter: Arc<AtomicUsize>,
+) -> Option<(String, String, JoinHandle<()>)> {
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return None,
+        Err(err) => panic!("listener should bind: {err}"),
+    };
+    let addr = listener.local_addr().expect("local addr should resolve");
+    let issuer = format!("http://{addr}");
+    let discovery_url = format!("{issuer}/.well-known/openid-configuration");
+    let access_token = build_access_token(access_exp);
+    let id_token = build_rs256_id_token(&issuer, "media-api-client", token_nonce, id_exp);
+
+    let discovery_document = serde_json::json!({
+        "authorization_endpoint": format!("{issuer}/authorize"),
+        "token_endpoint": format!("{issuer}/token"),
+        "jwks_uri": format!("{issuer}/jwks"),
+    });
+    let token_response = serde_json::json!({
+        "access_token": access_token,
+        "id_token": id_token,
+    });
+    let jwks_response = serde_json::json!({
+        "keys": [{
+            "kid": "test-kid",
+            "kty": "RSA",
+            "n": TEST_RSA_PUBLIC_KEY_N,
+            "e": TEST_RSA_PUBLIC_KEY_E,
+        }]
+    });
+
+    let app = Router::new()
+        .route(
+            "/.well-known/openid-configuration",
+            get({
+                let discovery_document = discovery_document.clone();
+                move || {
+                    let discovery_document = discovery_document.clone();
+                    async move { Json(discovery_document) }
+                }
+            }),
+        )
+        .route(
+            "/token",
+            post({
+                let token_response = token_response.clone();
+                move || {
+                    let token_response = token_response.clone();
+                    async move { Json(token_response) }
+                }
+            }),
+        )
+        .route(
+            "/jwks",
+            get({
+                let jwks_counter = Arc::clone(&jwks_counter);
+                let jwks_response = jwks_response.clone();
+                move || {
+                    let jwks_counter = Arc::clone(&jwks_counter);
+                    let jwks_response = jwks_response.clone();
+                    async move {
+                        jwks_counter.fetch_add(1, Ordering::SeqCst);
+                        Json(jwks_response)
+                    }
+                }
+            }),
+        );
+
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    Some((issuer, discovery_url, handle))
+}
+
 const TEST_RSA_PUBLIC_KEY_N: &str = "7HJe3QCJOYDP7OxXQHU0Y_0CnkKFT_s0ANH-ehQ2ZV6FoSSVTXDox0dyeze7sLHZBhkeDwFYVVwfaTqjvoB04LEm74E_ZVkXCIVszY_uNif9yq7BcIfag1ZuzaSfRvwaynZE7Pf0cVCrdhrufKAnTT0TN50ElOd4tEg_fYCOKW8PwIjxN-PKRjvM53xak3jX1NJwg9YyOUoYGyGxzzwYNd0asEQ92SPlMNSMeicS-mlczXvIrUPuBdpdDXY4Xg3GkRyV0D8rieodrFC7Qo1PPFc2bD3kUv6zuZDGxtfQsZrw5i0FtmeYuO6ni5L0iV9JkfqbEaUyzQMpfA3jGqaVIQ";
 const TEST_RSA_PUBLIC_KEY_E: &str = "AQAB";
 const TEST_RSA_PRIVATE_KEY_PEM: &str = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA7HJe3QCJOYDP7OxXQHU0Y/0CnkKFT/s0ANH+ehQ2ZV6FoSSV\nTXDox0dyeze7sLHZBhkeDwFYVVwfaTqjvoB04LEm74E/ZVkXCIVszY/uNif9yq7B\ncIfag1ZuzaSfRvwaynZE7Pf0cVCrdhrufKAnTT0TN50ElOd4tEg/fYCOKW8PwIjx\nN+PKRjvM53xak3jX1NJwg9YyOUoYGyGxzzwYNd0asEQ92SPlMNSMeicS+mlczXvI\nrUPuBdpdDXY4Xg3GkRyV0D8rieodrFC7Qo1PPFc2bD3kUv6zuZDGxtfQsZrw5i0F\ntmeYuO6ni5L0iV9JkfqbEaUyzQMpfA3jGqaVIQIDAQABAoIBACpVl/KN5APtskzD\nTCP4WDcG1+8qDeByI6956cxFzi98KwTdHfZNnv//JNo28l4Cmc7jtGQPY5d09RLM\nMwEq0sJgNY5wX79vohYefYqYmJgNtP0TKQNS76bQVOpw7Suye8GAR3r+MkAPp4Nv\n8v9RVXgY1VYBwQ5AG3Z78RIxcEKujdNhMosA5IA/KzCJD/XxQvAkbpCRgU6HEWNS\ndvn6zxOCGfE6wtqBgWBbIxcUKkyxgTd4v8gTM9thgfYDvmDHXsdUIByx86hRaGW5\nV1pvu548SkbbdbxTFFjN0NBgC9Al/HjxTXWZiGyLCbbPStWmle7oJLZegegNHEGC\n7fOUOLkCgYEA9tTGLDviglQJai0RdCAMIzIY2piX6hFLr87Td/tlXMpaOR9jd446\ndFX0yvmg7AvKykYzwpKKfbF4Oa82CJ/ROjM82xO00DCenBAmj6H8kN98YTpg54XP\nYK7woNnA87g+rrq6anMpjC1bIuqhB2ws/y3wPqjm3Rfihr4AnHb6lwMCgYEA9TrY\nwzwSZXYb+Frw7sNV0n6Fxtq0W53A4q6/MAALazbGnOaab1imEpvbAwkSGXlhI0jM\nYbeylvn84NZAFzWf0zZ/F7PP8feTT+LmpTIxDaVrgvaoZU8yMIeW5/Y70SUhKiab\n9nATjJC8nZcxVYJlZRsVO+8yTsHvBGzSxk0OCAsCgYEA5Z2ONPwIfMD8eR8vy108\nrUkfQcsOFxq70/KNWmItKyK6x8ThXQicbDjCHkgWYT+fCIhCAlEcME110AOkOmWh\n14hupkYwwDNaeUe094zzTTn5lOEf4IDkJ8bV5mxrSM4u0ZC3detnzRUsYNDvt930\nBfaQNVoeWbKscjgyjVtJRk0CgYBmv2BA9PN0RXdUqK3YLEnSJybf+ZSl6kP99l+u\nueYO5uVyqgA89PSoSVsLO4q017GGeiMAMlqGfXmhrsMttk8fzO6VPMa8yBGV4Cjp\nQE1jPVL9jWFjCTqrMLRevkGz0I3DvmeMassWEzKkCMwn2rmnEiDkesUmUIVX4kyx\nv2lInwKBgD7N8KhN3fyM3PAyEx7eB0jQvTiCbXjvzz+5jawmoySFLt4IDY6r06+O\nw9tlNvgCk2ce2/dhr6Tfd+lbyEN3EGzVK/q42W9q35KqvfS71fH12bSC7AaExyZo\n5dVn/NAdfZh1Kjhb3j2HSGbeBK42C4iu8fwZXfIFrPVEiXxXujfF\n-----END RSA PRIVATE KEY-----\n";
@@ -552,6 +632,115 @@ async fn callback_rejects_nonce_mismatch_after_token_verification() {
 
     server_handle.abort();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn callback_clamps_session_cookie_max_age() {
+    let jwks_counter = Arc::new(AtomicUsize::new(0));
+    let Some((issuer, discovery_url, server_handle)) = start_callback_oidc_server(
+        "nonce-1",
+        unix_now() + 86_400,
+        unix_now() + 7_200,
+        Arc::clone(&jwks_counter),
+    )
+    .await
+    else {
+        eprintln!("skipping session max-age clamp test: listener bind is not permitted");
+        return;
+    };
+
+    let secret = vec![0x77; 32];
+    let signed = sign_challenge_cookie_value("test-verifier", "state-1", "nonce-1", i64::MAX, &secret)
+        .expect("challenge should sign");
+    let app = build_app_with_options(
+        AppState::new(String::new(), false).with_oidc(OidcConfig::new(
+            issuer,
+            "media-api-client".to_string(),
+            Some("media-api-secret".to_string()),
+            "http://localhost:8080/auth/callback".to_string(),
+            discovery_url,
+            secret,
+        )),
+        None,
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/auth/callback?code=abc&state=state-1")
+                .header(COOKIE, format!("auth-challenge={signed}"))
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    server_handle.abort();
+    assert_eq!(response.status(), StatusCode::FOUND);
+    let cookies: Vec<String> = response
+        .headers()
+        .get_all(SET_COOKIE)
+        .iter()
+        .map(|value| value.to_str().expect("cookie should be utf8").to_string())
+        .collect();
+    let session_cookie = cookies
+        .iter()
+        .find(|cookie| cookie.starts_with("session="))
+        .expect("session cookie should be set");
+    assert!(session_cookie.contains(&format!("Max-Age={DEFAULT_SESSION_MAX_AGE_SECS}")));
+}
+
+#[tokio::test]
+async fn callback_reuses_cached_jwks_within_ttl() {
+    let jwks_counter = Arc::new(AtomicUsize::new(0));
+    let Some((issuer, discovery_url, server_handle)) = start_callback_oidc_server(
+        "nonce-1",
+        unix_now() + 3_600,
+        unix_now() + 3_600,
+        Arc::clone(&jwks_counter),
+    )
+    .await
+    else {
+        eprintln!("skipping jwks cache test: listener bind is not permitted");
+        return;
+    };
+
+    let secret = vec![0x88; 32];
+    let app = build_app_with_options(
+        AppState::new(String::new(), false)
+            .with_oidc(OidcConfig::new(
+                issuer,
+                "media-api-client".to_string(),
+                Some("media-api-secret".to_string()),
+                "http://localhost:8080/auth/callback".to_string(),
+                discovery_url,
+                secret.clone(),
+            ))
+            .with_oidc_discovery_ttl_secs(60),
+        None,
+    );
+
+    for state in ["state-1", "state-2"] {
+        let signed = sign_challenge_cookie_value("test-verifier", state, "nonce-1", i64::MAX, &secret)
+            .expect("challenge should sign");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/auth/callback?code=abc&state={state}"))
+                    .header(COOKIE, format!("auth-challenge={signed}"))
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::FOUND);
+    }
+
+    server_handle.abort();
+    assert_eq!(jwks_counter.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

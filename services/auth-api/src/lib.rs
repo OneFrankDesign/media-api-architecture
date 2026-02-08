@@ -47,6 +47,7 @@ pub struct AppState {
     http_client: reqwest::Client,
     oidc_discovery_ttl_secs: u64,
     discovery_cache: Arc<RwLock<Option<CachedDiscovery>>>,
+    jwks_cache: Arc<RwLock<Option<CachedJwks>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -83,6 +84,7 @@ impl AppState {
             http_client: reqwest::Client::new(),
             oidc_discovery_ttl_secs: DEFAULT_OIDC_DISCOVERY_TTL_SECS,
             discovery_cache: Arc::new(RwLock::new(None)),
+            jwks_cache: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -191,23 +193,30 @@ struct CachedDiscovery {
     expires_at_unix: i64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct TokenEndpointResponse {
     access_token: String,
     id_token: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct Jwks {
     keys: Vec<Jwk>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct Jwk {
     kid: Option<String>,
     kty: String,
     n: Option<String>,
     e: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedJwks {
+    jwks_uri: String,
+    document: Jwks,
+    expires_at_unix: i64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -474,8 +483,7 @@ async fn auth_callback(
         None => return bad_gateway("token response missing id_token").into_response(),
     };
 
-    let id_claims =
-        match verify_id_token(&state.http_client, id_token, &discovery.jwks_uri, oidc).await {
+    let id_claims = match verify_id_token(&state, id_token, &discovery.jwks_uri, oidc).await {
             Ok(claims) => claims,
             Err(err) => {
                 error!(error = %err, "id token verification failed");
@@ -500,7 +508,10 @@ async fn auth_callback(
             id_claims.exp
         }
     };
-    let max_age = (exp - unix_now()).max(1) as u64;
+    let now = unix_now();
+    let bounded_exp = exp.min(id_claims.exp);
+    let max_age = (bounded_exp - now)
+        .clamp(1, DEFAULT_SESSION_MAX_AGE_SECS as i64) as u64;
 
     let session_token = Uuid::new_v4().to_string();
     let csrf_token = Uuid::new_v4().to_string();
@@ -874,7 +885,7 @@ async fn exchange_code_for_tokens(
 }
 
 async fn verify_id_token(
-    client: &reqwest::Client,
+    state: &AppState,
     id_token: &str,
     jwks_uri: &str,
     oidc: &OidcConfig,
@@ -882,19 +893,7 @@ async fn verify_id_token(
     let header = decode_header(id_token).map_err(|err| err.to_string())?;
     let kid = header.kid;
 
-    let jwks_response = client
-        .get(jwks_uri)
-        .send()
-        .await
-        .map_err(|err| err.to_string())?;
-    if !jwks_response.status().is_success() {
-        return Err(format!("jwks endpoint returned {}", jwks_response.status()));
-    }
-
-    let jwks = jwks_response
-        .json::<Jwks>()
-        .await
-        .map_err(|err| err.to_string())?;
+    let jwks = jwks_document(state, jwks_uri).await?;
 
     let jwk = if let Some(kid) = kid {
         jwks.keys
@@ -924,6 +923,43 @@ async fn verify_id_token(
         .map_err(|err| err.to_string())?;
 
     Ok(token_data.claims)
+}
+
+async fn jwks_document(state: &AppState, jwks_uri: &str) -> Result<Jwks, String> {
+    let now = unix_now();
+    if let Some(cached) = state.jwks_cache.read().await.as_ref() {
+        if cached.expires_at_unix > now && cached.jwks_uri == jwks_uri {
+            return Ok(cached.document.clone());
+        }
+    }
+
+    let fresh = fetch_jwks_document(&state.http_client, jwks_uri).await?;
+    let expires_at_unix = now + state.oidc_discovery_ttl_secs as i64;
+    {
+        let mut cache = state.jwks_cache.write().await;
+        *cache = Some(CachedJwks {
+            jwks_uri: jwks_uri.to_string(),
+            document: fresh.clone(),
+            expires_at_unix,
+        });
+    }
+    Ok(fresh)
+}
+
+async fn fetch_jwks_document(client: &reqwest::Client, jwks_uri: &str) -> Result<Jwks, String> {
+    let jwks_response = client
+        .get(jwks_uri)
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+    if !jwks_response.status().is_success() {
+        return Err(format!("jwks endpoint returned {}", jwks_response.status()));
+    }
+
+    jwks_response
+        .json::<Jwks>()
+        .await
+        .map_err(|err| err.to_string())
 }
 
 fn access_token_exp(access_token: &str) -> Option<i64> {

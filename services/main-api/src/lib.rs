@@ -151,7 +151,10 @@ pub struct MetadataStore {
     records: Arc<DashMap<String, Arc<VideoMetadata>>>,
     by_owner: Arc<DashMap<String, Vec<String>>>,
     by_visibility: Arc<DashMap<i32, Vec<String>>>,
+    capacity_permits: Arc<DashMap<String, tokio::sync::OwnedSemaphorePermit>>,
+    capacity_limiter: Arc<tokio::sync::Semaphore>,
     max_records: usize,
+    mutation_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl MetadataStore {
@@ -160,7 +163,10 @@ impl MetadataStore {
             records: Arc::new(DashMap::new()),
             by_owner: Arc::new(DashMap::new()),
             by_visibility: Arc::new(DashMap::new()),
+            capacity_permits: Arc::new(DashMap::new()),
+            capacity_limiter: Arc::new(tokio::sync::Semaphore::new(max_records)),
             max_records,
+            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -290,6 +296,14 @@ impl MetadataService for MetadataServiceImpl {
 
         validate_metadata(&metadata)?;
 
+        let permit = self
+            .store
+            .capacity_limiter
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                Status::resource_exhausted("metadata store has reached max capacity")
+            })?;
         if self.store.records.len() >= self.store.max_records {
             return Err(Status::resource_exhausted(
                 "metadata store has reached max capacity",
@@ -297,8 +311,9 @@ impl MetadataService for MetadataServiceImpl {
         }
 
         let metadata_ref = Arc::new(metadata.clone());
-        self.store.records.insert(id, Arc::clone(&metadata_ref));
+        self.store.records.insert(id.clone(), Arc::clone(&metadata_ref));
         self.store.add_indexes_for(metadata_ref.as_ref());
+        self.store.capacity_permits.insert(id, permit);
 
         Ok(Response::new(CreateMetadataResponse {
             metadata: Some(metadata),
@@ -439,6 +454,16 @@ impl MetadataService for MetadataServiceImpl {
             .metadata
             .ok_or_else(|| Status::invalid_argument("metadata payload is required"))?;
 
+        let mask = req
+            .update_mask
+            .ok_or_else(|| Status::invalid_argument("update_mask is required"))?;
+        if mask.paths.is_empty() {
+            return Err(Status::invalid_argument(
+                "update_mask.paths must not be empty",
+            ));
+        }
+
+        let _mutation_guard = self.store.mutation_lock.lock().await;
         let existing = self
             .store
             .records
@@ -452,15 +477,6 @@ impl MetadataService for MetadataServiceImpl {
         let mut candidate = existing.as_ref().clone();
         let previous = existing.as_ref().clone();
         drop(existing);
-
-        let mask = req
-            .update_mask
-            .ok_or_else(|| Status::invalid_argument("update_mask is required"))?;
-        if mask.paths.is_empty() {
-            return Err(Status::invalid_argument(
-                "update_mask.paths must not be empty",
-            ));
-        }
 
         for path in mask.paths {
             apply_field(&mut candidate, &patch, &path)?;
@@ -495,6 +511,7 @@ impl MetadataService for MetadataServiceImpl {
             return Err(Status::invalid_argument("id is required"));
         }
 
+        let _mutation_guard = self.store.mutation_lock.lock().await;
         if let Some(existing) = self.store.records.get(&req.id) {
             if !identity.is_admin && existing.owner_id != identity.sub {
                 return Err(Status::permission_denied(
@@ -509,6 +526,7 @@ impl MetadataService for MetadataServiceImpl {
             .remove(&req.id)
             .ok_or_else(|| Status::not_found("metadata not found"))?;
         self.store.remove_indexes_for(removed.1.as_ref());
+        self.store.capacity_permits.remove(&req.id);
 
         Ok(Response::new(DeleteMetadataResponse {}))
     }
@@ -1235,6 +1253,227 @@ mod tests {
             .await
             .expect_err("second record should exceed max_records");
         assert_eq!(err.code(), tonic::Code::ResourceExhausted);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_create_respects_max_records_capacity() {
+        let service = Arc::new(MetadataServiceImpl {
+            store: MetadataStore::new(5),
+            cursor_secret: Arc::new(b"test-cursor-secret".to_vec()),
+            cursor_ttl_secs: DEFAULT_CURSOR_TTL_SECS,
+            admin_unscoped_list_limit: DEFAULT_ADMIN_UNSCOPED_LIST_LIMIT,
+        });
+
+        let mut tasks = Vec::new();
+        for idx in 0..32 {
+            let service = Arc::clone(&service);
+            tasks.push(tokio::spawn(async move {
+                service
+                    .create_metadata(authorized_request(
+                        CreateMetadataRequest {
+                            title: format!("record-{idx}"),
+                            description: String::new(),
+                            tags: vec![],
+                            mime_type: "video/mp4".to_string(),
+                            file_size: 1,
+                            visibility: api::v1::Visibility::Private as i32,
+                        },
+                        "owner-1",
+                        &["user"],
+                    ))
+                    .await
+            }));
+        }
+
+        let mut created = 0;
+        let mut exhausted = 0;
+        for task in tasks {
+            let result = task.await.expect("task should complete");
+            match result {
+                Ok(_) => created += 1,
+                Err(status) if status.code() == tonic::Code::ResourceExhausted => exhausted += 1,
+                Err(status) => panic!("unexpected create failure: {status}"),
+            }
+        }
+
+        assert_eq!(created, 5);
+        assert_eq!(exhausted, 27);
+        assert_eq!(service.store.records.len(), 5);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_update_and_delete_do_not_resurrect_records() {
+        let service = Arc::new(MetadataServiceImpl {
+            store: MetadataStore::new(64),
+            cursor_secret: Arc::new(b"test-cursor-secret".to_vec()),
+            cursor_ttl_secs: DEFAULT_CURSOR_TTL_SECS,
+            admin_unscoped_list_limit: DEFAULT_ADMIN_UNSCOPED_LIST_LIMIT,
+        });
+
+        for idx in 0..32 {
+            let created = service
+                .create_metadata(authorized_request(
+                    CreateMetadataRequest {
+                        title: format!("record-{idx}"),
+                        description: "before".to_string(),
+                        tags: vec![],
+                        mime_type: "video/mp4".to_string(),
+                        file_size: 1,
+                        visibility: api::v1::Visibility::Private as i32,
+                    },
+                    "owner-1",
+                    &["user"],
+                ))
+                .await
+                .expect("record creation should succeed")
+                .into_inner()
+                .metadata
+                .expect("metadata should be present");
+            let id = created.id.clone();
+
+            let mut patch = created.clone();
+            patch.description = "after".to_string();
+
+            let update_service = Arc::clone(&service);
+            let update_id = id.clone();
+            let update_task = tokio::spawn(async move {
+                update_service
+                    .update_metadata(authorized_request(
+                        UpdateMetadataRequest {
+                            id: update_id,
+                            metadata: Some(patch),
+                            update_mask: Some(prost_types::FieldMask {
+                                paths: vec!["description".to_string()],
+                            }),
+                        },
+                        "owner-1",
+                        &["user"],
+                    ))
+                    .await
+            });
+
+            let delete_service = Arc::clone(&service);
+            let delete_id = id.clone();
+            let delete_task = tokio::spawn(async move {
+                delete_service
+                    .delete_metadata(authorized_request(
+                        DeleteMetadataRequest {
+                            id: delete_id,
+                            permanent: false,
+                        },
+                        "owner-1",
+                        &["user"],
+                    ))
+                    .await
+            });
+
+            let update_result = update_task.await.expect("update task should complete");
+            let delete_result = delete_task.await.expect("delete task should complete");
+
+            assert!(delete_result.is_ok(), "delete should succeed");
+            if let Err(status) = update_result {
+                assert_eq!(status.code(), tonic::Code::NotFound);
+            }
+
+            assert!(
+                service.store.records.get(&id).is_none(),
+                "record should not be resurrected after delete"
+            );
+            let owner_index_contains = service
+                .store
+                .by_owner
+                .get("owner-1")
+                .map(|ids| ids.iter().any(|candidate| candidate == &id))
+                .unwrap_or(false);
+            assert!(
+                !owner_index_contains,
+                "owner index should not retain deleted id"
+            );
+            let visibility_index_contains = service
+                .store
+                .by_visibility
+                .get(&(api::v1::Visibility::Private as i32))
+                .map(|ids| ids.iter().any(|candidate| candidate == &id))
+                .unwrap_or(false);
+            assert!(
+                !visibility_index_contains,
+                "visibility index should not retain deleted id"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_releases_capacity_for_subsequent_create() {
+        let service = MetadataServiceImpl {
+            store: MetadataStore::new(1),
+            cursor_secret: Arc::new(b"test-cursor-secret".to_vec()),
+            cursor_ttl_secs: DEFAULT_CURSOR_TTL_SECS,
+            admin_unscoped_list_limit: DEFAULT_ADMIN_UNSCOPED_LIST_LIMIT,
+        };
+
+        let created = service
+            .create_metadata(authorized_request(
+                CreateMetadataRequest {
+                    title: "first".to_string(),
+                    description: String::new(),
+                    tags: vec![],
+                    mime_type: "video/mp4".to_string(),
+                    file_size: 1,
+                    visibility: api::v1::Visibility::Private as i32,
+                },
+                "owner-1",
+                &["user"],
+            ))
+            .await
+            .expect("first create should succeed")
+            .into_inner()
+            .metadata
+            .expect("metadata should be returned");
+
+        let exhausted = service
+            .create_metadata(authorized_request(
+                CreateMetadataRequest {
+                    title: "second".to_string(),
+                    description: String::new(),
+                    tags: vec![],
+                    mime_type: "video/mp4".to_string(),
+                    file_size: 1,
+                    visibility: api::v1::Visibility::Private as i32,
+                },
+                "owner-1",
+                &["user"],
+            ))
+            .await
+            .expect_err("second create should be capacity-limited");
+        assert_eq!(exhausted.code(), tonic::Code::ResourceExhausted);
+
+        service
+            .delete_metadata(authorized_request(
+                DeleteMetadataRequest {
+                    id: created.id.clone(),
+                    permanent: false,
+                },
+                "owner-1",
+                &["user"],
+            ))
+            .await
+            .expect("delete should succeed");
+
+        service
+            .create_metadata(authorized_request(
+                CreateMetadataRequest {
+                    title: "third".to_string(),
+                    description: String::new(),
+                    tags: vec![],
+                    mime_type: "video/mp4".to_string(),
+                    file_size: 1,
+                    visibility: api::v1::Visibility::Private as i32,
+                },
+                "owner-1",
+                &["user"],
+            ))
+            .await
+            .expect("create should succeed again after delete releases capacity");
     }
 
     #[test]
