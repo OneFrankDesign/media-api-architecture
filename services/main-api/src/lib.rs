@@ -259,7 +259,11 @@ pub fn apply_field(
         "tags" => target.tags = patch.tags.clone(),
         "mime_type" => target.mime_type = patch.mime_type.clone(),
         "file_size" => target.file_size = patch.file_size,
-        "owner_id" => target.owner_id = patch.owner_id.clone(),
+        "owner_id" => {
+            return Err(Status::invalid_argument(
+                "owner_id is server-managed and cannot be updated",
+            ))
+        }
         "visibility" => target.visibility = patch.visibility,
         _ => {
             return Err(Status::invalid_argument(format!(
@@ -276,8 +280,18 @@ pub fn validate_metadata(metadata: &VideoMetadata) -> std::result::Result<(), St
         return Err(Status::invalid_argument("title cannot be empty"));
     }
 
+    if metadata.mime_type.trim().is_empty() {
+        return Err(Status::invalid_argument("mime_type cannot be empty"));
+    }
+
     if metadata.file_size < 0 {
         return Err(Status::invalid_argument("file_size must be >= 0"));
+    }
+
+    if api::v1::Visibility::try_from(metadata.visibility).is_err() {
+        return Err(Status::invalid_argument(
+            "visibility must be a known enum value",
+        ));
     }
 
     Ok(())
@@ -371,8 +385,14 @@ pub async fn run(config: ServerConfig) -> AnyhowResult<()> {
 
     let mut first_error: Option<anyhow::Error> = None;
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!("shutdown signal received");
+        signal = shutdown_signal() => {
+            match signal {
+                Ok(signal_name) => info!(signal = signal_name, "shutdown signal received"),
+                Err(err) => {
+                    error!(error = %err, "failed to listen for shutdown signal");
+                    first_error = Some(err);
+                }
+            }
         }
         joined = tasks.join_next() => {
             if let Some(joined) = joined {
@@ -398,6 +418,23 @@ pub async fn run(config: ServerConfig) -> AnyhowResult<()> {
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() -> AnyhowResult<&'static str> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut sigterm = signal(SignalKind::terminate()).map_err(anyhow::Error::from)?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result.map(|_| "SIGINT").map_err(anyhow::Error::from),
+        _ = sigterm.recv() => Ok("SIGTERM"),
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() -> AnyhowResult<&'static str> {
+    tokio::signal::ctrl_c().await.map_err(anyhow::Error::from)?;
+    Ok("SIGINT")
 }
 
 fn observe_server_exit(
@@ -469,8 +506,18 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
 
         metadata.title = "ok".to_string();
+        metadata.mime_type = "   ".to_string();
+        let err = validate_metadata(&metadata).expect_err("empty mime type should fail");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        metadata.mime_type = "video/mp4".to_string();
         metadata.file_size = -1;
         let err = validate_metadata(&metadata).expect_err("negative size should fail");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        metadata.file_size = 1;
+        metadata.visibility = 99;
+        let err = validate_metadata(&metadata).expect_err("invalid visibility should fail");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 
@@ -480,12 +527,18 @@ mod tests {
         let mut patch = sample_metadata("id-2", 2, 0);
         patch.title = "updated".to_string();
         patch.file_size = 42;
+        patch.owner_id = "other-owner".to_string();
 
         apply_field(&mut target, &patch, "title").expect("title update should succeed");
         apply_field(&mut target, &patch, "file_size").expect("file size update should succeed");
 
         assert_eq!(target.title, "updated");
         assert_eq!(target.file_size, 42);
+
+        let err = apply_field(&mut target, &patch, "owner_id")
+            .expect_err("owner_id update should be rejected");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(target.owner_id, "owner");
 
         let err = apply_field(&mut target, &patch, "unknown").expect_err("field should fail");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
