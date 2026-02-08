@@ -209,7 +209,7 @@ impl MetadataService for MetadataServiceImpl {
             .ok_or_else(|| Status::invalid_argument("update_mask is required"))?;
         if mask.paths.is_empty() {
             return Err(Status::invalid_argument(
-                "update_mask.paths must not be empty when update_mask is provided",
+                "update_mask.paths must not be empty",
             ));
         }
 

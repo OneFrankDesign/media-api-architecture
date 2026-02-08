@@ -141,7 +141,7 @@ services:
       - "9000:9000"
       - "9001:9001"
     healthcheck:
-      test: ["CMD-SHELL", "(command -v curl >/dev/null && curl -fsS http://localhost:9000/minio/health/ready >/dev/null) || (command -v wget >/dev/null && wget -qO- http://localhost:9000/minio/health/ready >/dev/null)"]
+      test: ["CMD", "/usr/bin/curl", "--fail", "--silent", "http://localhost:9000/minio/health/ready"]
       interval: 15s
       timeout: 5s
       retries: 10

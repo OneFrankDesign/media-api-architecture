@@ -29,12 +29,12 @@ describe("MediaApiSdk", () => {
   });
 
   function expectAuthHeaders(metadata: RequestMetadata, auth: AuthContext) {
-    expect(metadata.Authorization).toBe(`Bearer ${auth.accessToken}`);
+    expect(metadata.authorization).toBe(`Bearer ${auth.accessToken}`);
 
     if (auth.csrfToken) {
-      expect(metadata["X-CSRF-Token"]).toBe(auth.csrfToken);
+      expect(metadata["x-csrf-token"]).toBe(auth.csrfToken);
     } else {
-      expect(metadata["X-CSRF-Token"]).toBeUndefined();
+      expect(metadata["x-csrf-token"]).toBeUndefined();
     }
   }
 
