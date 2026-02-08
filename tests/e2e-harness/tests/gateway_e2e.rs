@@ -1,7 +1,12 @@
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use anyhow::{anyhow, Context, Result};
-use reqwest::{header, Client, StatusCode};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use main_api::api::v1::metadata_service_client::MetadataServiceClient;
+use main_api::api::v1::{CreateMetadataRequest, ListMetadataRequest, Visibility};
+use reqwest::{header, redirect::Policy, Client, StatusCode, Url};
 use serde_json::json;
-use tokio::time::{sleep, Duration};
+use tokio::time::sleep;
 
 const CLIENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -13,6 +18,17 @@ fn env_or_default(key: &str, default: &str) -> String {
 
 fn build_test_client() -> Result<Client> {
     Client::builder()
+        .cookie_store(true)
+        .connect_timeout(CLIENT_CONNECT_TIMEOUT)
+        .timeout(CLIENT_REQUEST_TIMEOUT)
+        .build()
+        .context("client should build")
+}
+
+fn build_no_redirect_client() -> Result<Client> {
+    Client::builder()
+        .cookie_store(true)
+        .redirect(Policy::none())
         .connect_timeout(CLIENT_CONNECT_TIMEOUT)
         .timeout(CLIENT_REQUEST_TIMEOUT)
         .build()
@@ -39,6 +55,46 @@ fn cookie_value_from_set_cookie(set_cookie: &[String], cookie_name: &str) -> Opt
             None
         }
     })
+}
+
+fn response_header(
+    response: &reqwest::Response,
+    header_name: &header::HeaderName,
+) -> Option<String> {
+    response
+        .headers()
+        .get(header_name)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned)
+}
+
+fn absolutize_url(base: &str, candidate: &str) -> Result<String> {
+    if candidate.starts_with("http://") || candidate.starts_with("https://") {
+        return Ok(candidate.to_string());
+    }
+
+    let base_url = Url::parse(base).context("base URL should parse")?;
+    base_url
+        .join(candidate)
+        .map(|url| url.to_string())
+        .context("relative URL should resolve against base")
+}
+
+fn extract_input_value(body: &str, marker: &str) -> Result<String> {
+    let start = body
+        .find(marker)
+        .ok_or_else(|| anyhow!("expected marker not found: {marker}"))?;
+    let after = &body[start + marker.len()..];
+    let end = after
+        .find('"')
+        .ok_or_else(|| anyhow!("missing closing quote for marker: {marker}"))?;
+
+    Ok(after[..end].replace("&amp;", "&"))
+}
+
+struct OidcLoginFlow {
+    callback_url: String,
+    challenge_cookie: String,
 }
 
 async fn wait_for_ok(client: &Client, url: &str) -> Result<()> {
@@ -90,6 +146,201 @@ async fn wait_for_stack(client: &Client) -> Result<()> {
     Ok(())
 }
 
+async fn complete_oidc_login_flow(client: &Client, gateway_port: &str) -> Result<OidcLoginFlow> {
+    let login_response = client
+        .get(format!("http://localhost:{gateway_port}/auth/login"))
+        .send()
+        .await
+        .context("auth/login request should succeed")?;
+    assert_eq!(login_response.status(), StatusCode::FOUND);
+    let challenge_cookie =
+        cookie_value_from_set_cookie(&set_cookie_headers(&login_response), "auth-challenge")
+            .context("auth/login should set auth-challenge cookie")?;
+
+    let authorize_location = response_header(&login_response, &header::LOCATION)
+        .context("auth/login should set location header")?;
+    let browser_authorize_url =
+        authorize_location.replace("http://oidc-mock", "http://localhost:9080");
+
+    let authorize_response = client
+        .get(browser_authorize_url)
+        .send()
+        .await
+        .context("OIDC authorize request should succeed")?;
+    assert_eq!(authorize_response.status(), StatusCode::FOUND);
+
+    let login_page_location = response_header(&authorize_response, &header::LOCATION)
+        .context("authorize response should redirect to login page")?;
+    let login_page_url = absolutize_url("http://localhost:9080", &login_page_location)?;
+
+    let login_page_response = client
+        .get(login_page_url.clone())
+        .send()
+        .await
+        .context("OIDC login page request should succeed")?;
+    assert_eq!(login_page_response.status(), StatusCode::OK);
+    let login_page_html = login_page_response
+        .text()
+        .await
+        .context("OIDC login page should be readable")?;
+
+    let csrf_token = extract_input_value(
+        &login_page_html,
+        "name=\"__RequestVerificationToken\" type=\"hidden\" value=\"",
+    )?;
+    let return_url = extract_input_value(&login_page_html, "name=\"ReturnUrl\" value=\"")?;
+
+    let login_submit_response = client
+        .post(login_page_url)
+        .form(&[
+            ("ReturnUrl", return_url.as_str()),
+            ("Username", "testuser"),
+            ("Password", "testpass"),
+            ("button", "login"),
+            ("__RequestVerificationToken", csrf_token.as_str()),
+        ])
+        .send()
+        .await
+        .context("OIDC login form submission should succeed")?;
+    assert_eq!(login_submit_response.status(), StatusCode::FOUND);
+
+    let authorize_callback_location = response_header(&login_submit_response, &header::LOCATION)
+        .context("login form should redirect to authorize callback")?
+        .replace("&amp;", "&");
+    let authorize_callback_url =
+        absolutize_url("http://localhost:9080", &authorize_callback_location)?;
+
+    let authorize_callback_response = client
+        .get(authorize_callback_url)
+        .send()
+        .await
+        .context("OIDC authorize callback should succeed")?;
+    assert_eq!(authorize_callback_response.status(), StatusCode::FOUND);
+
+    let callback_url = response_header(&authorize_callback_response, &header::LOCATION)
+        .context("authorize callback should redirect back to gateway callback")?;
+
+    Ok(OidcLoginFlow {
+        callback_url,
+        challenge_cookie,
+    })
+}
+
+fn pkce_verifier_from_challenge_cookie(challenge_cookie: &str) -> Result<String> {
+    let (encoded_payload, _) = challenge_cookie
+        .split_once('.')
+        .ok_or_else(|| anyhow!("challenge cookie format is invalid"))?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(encoded_payload)
+        .context("challenge cookie payload should decode")?;
+    let payload_json = serde_json::from_slice::<serde_json::Value>(&payload)
+        .context("challenge cookie payload should be valid json")?;
+
+    payload_json
+        .get("verifier")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow!("challenge cookie payload missing verifier"))
+}
+
+async fn fetch_access_token(client: &Client, gateway_port: &str) -> Result<String> {
+    let login_flow = complete_oidc_login_flow(client, gateway_port).await?;
+    let verifier = pkce_verifier_from_challenge_cookie(&login_flow.challenge_cookie)?;
+    let callback_url =
+        Url::parse(&login_flow.callback_url).context("gateway callback URL should parse")?;
+    let code = callback_url
+        .query_pairs()
+        .find(|(name, _)| name == "code")
+        .map(|(_, value)| value.to_string())
+        .context("gateway callback URL should include authorization code")?;
+
+    let response = client
+        .post("http://localhost:9080/connect/token")
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("client_id", "media-api-client"),
+            ("client_secret", "media-api-secret"),
+            ("code", code.as_str()),
+            ("redirect_uri", "http://localhost:8080/auth/callback"),
+            ("code_verifier", verifier.as_str()),
+        ])
+        .send()
+        .await
+        .context("authorization code token request should succeed")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<unreadable body>".to_string());
+        return Err(anyhow!("token endpoint returned {status}: {body}"));
+    }
+
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .context("token endpoint response should parse as json")?;
+    if let Some(id_token) = body.get("id_token").and_then(|value| value.as_str()) {
+        return Ok(id_token.to_string());
+    }
+
+    body.get("access_token")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow!("token endpoint response missing id_token/access_token"))
+}
+
+fn authorized_grpc_request<T>(inner: T, access_token: &str) -> Result<tonic::Request<T>> {
+    let mut request = tonic::Request::new(inner);
+    let auth_value = format!("Bearer {access_token}")
+        .parse()
+        .context("authorization metadata should parse")?;
+    request.metadata_mut().insert("authorization", auth_value);
+    request.metadata_mut().insert(
+        "origin",
+        "http://localhost:3000"
+            .parse()
+            .context("origin metadata should parse")?,
+    );
+    request.metadata_mut().insert(
+        "x-csrf-token",
+        "bootstrap-csrf"
+            .parse()
+            .context("csrf metadata should parse")?,
+    );
+    request.metadata_mut().insert(
+        "cookie",
+        "csrf-token=bootstrap-csrf"
+            .parse()
+            .context("cookie metadata should parse")?,
+    );
+    Ok(request)
+}
+
+fn csrf_ready_grpc_request<T>(inner: T) -> Result<tonic::Request<T>> {
+    let mut request = tonic::Request::new(inner);
+    request.metadata_mut().insert(
+        "origin",
+        "http://localhost:3000"
+            .parse()
+            .context("origin metadata should parse")?,
+    );
+    request.metadata_mut().insert(
+        "x-csrf-token",
+        "bootstrap-csrf"
+            .parse()
+            .context("csrf metadata should parse")?,
+    );
+    request.metadata_mut().insert(
+        "cookie",
+        "csrf-token=bootstrap-csrf"
+            .parse()
+            .context("cookie metadata should parse")?,
+    );
+    Ok(request)
+}
+
 #[tokio::test]
 async fn compose_services_report_healthy() -> Result<()> {
     let client = build_test_client()?;
@@ -111,6 +362,101 @@ async fn compose_services_report_healthy() -> Result<()> {
         .await
         .context("main health request should succeed")?;
     assert_eq!(main.status(), StatusCode::OK);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auth_login_redirects_to_oidc_provider() -> Result<()> {
+    let client = build_no_redirect_client()?;
+    wait_for_stack(&client).await?;
+
+    let gateway_port = env_or_default("ENVOY_HTTP_PORT", "8080");
+
+    let response = client
+        .get(format!("http://localhost:{gateway_port}/auth/login"))
+        .send()
+        .await
+        .context("auth/login should return a response")?;
+
+    assert_eq!(response.status(), StatusCode::FOUND);
+    let location =
+        response_header(&response, &header::LOCATION).context("location header missing")?;
+    assert!(location.contains("/connect/authorize"));
+    assert!(location.contains("code_challenge="));
+    assert!(location.contains("state="));
+
+    let set_cookies = set_cookie_headers(&response);
+    assert!(set_cookies
+        .iter()
+        .any(|cookie| cookie.starts_with("auth-challenge=")
+            && cookie.contains("Path=/auth/callback")));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auth_callback_exchanges_code_and_sets_session() -> Result<()> {
+    let client = build_no_redirect_client()?;
+    wait_for_stack(&client).await?;
+
+    let gateway_port = env_or_default("ENVOY_HTTP_PORT", "8080");
+    let login_flow = complete_oidc_login_flow(&client, &gateway_port).await?;
+
+    let callback_response = client
+        .get(login_flow.callback_url)
+        .send()
+        .await
+        .context("auth/callback request should return response")?;
+
+    assert_eq!(callback_response.status(), StatusCode::FOUND);
+
+    let set_cookies = set_cookie_headers(&callback_response);
+    assert!(set_cookies
+        .iter()
+        .any(|cookie| cookie.starts_with("session=") && cookie.contains("HttpOnly")));
+    assert!(set_cookies
+        .iter()
+        .any(|cookie| cookie.starts_with("csrf-token=")));
+    assert!(set_cookies.iter().any(|cookie| {
+        cookie.starts_with("auth-challenge=deleted") && cookie.contains("Max-Age=0")
+    }));
+    assert_eq!(
+        response_header(&callback_response, &header::LOCATION).unwrap_or_default(),
+        "/"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auth_session_deprecated_but_functional() -> Result<()> {
+    let client = build_test_client()?;
+    wait_for_stack(&client).await?;
+
+    let gateway_port = env_or_default("ENVOY_HTTP_PORT", "8080");
+    let origin = "http://localhost:3000";
+    let bootstrap_csrf = "bootstrap-csrf";
+
+    let response = client
+        .post(format!("http://localhost:{gateway_port}/auth/session"))
+        .header(header::ORIGIN, origin)
+        .header("x-csrf-token", bootstrap_csrf)
+        .header(header::COOKIE, format!("csrf-token={bootstrap_csrf}"))
+        .json(&json!({"subject": "deprecated-flow-user"}))
+        .send()
+        .await
+        .context("session create request should succeed")?;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        response_header(&response, &header::HeaderName::from_static("deprecation"))
+            .unwrap_or_default(),
+        "true"
+    );
+    assert!(response
+        .headers()
+        .contains_key(header::HeaderName::from_static("sunset")));
 
     Ok(())
 }
@@ -224,6 +570,126 @@ async fn gateway_does_not_bypass_security_for_unknown_auth_paths() -> Result<()>
 
     assert_ne!(response.status(), StatusCode::NOT_FOUND);
     assert!(response.status().is_client_error());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_grpc_rejects_missing_bearer_token() -> Result<()> {
+    let client = build_no_redirect_client()?;
+    wait_for_stack(&client).await?;
+
+    let gateway_port = env_or_default("ENVOY_HTTP_PORT", "8080");
+    let endpoint =
+        tonic::transport::Endpoint::from_shared(format!("http://localhost:{gateway_port}"))
+            .context("gateway endpoint should parse")?;
+    let channel = endpoint
+        .connect()
+        .await
+        .context("gRPC channel to gateway should connect")?;
+    let mut grpc = MetadataServiceClient::new(channel);
+
+    let err = grpc
+        .list_metadata(csrf_ready_grpc_request(ListMetadataRequest {
+            page_size: 1,
+            page_token: String::new(),
+            filter_owner_id: String::new(),
+            filter_visibility: 0,
+            filter_tags: vec![],
+            search_query: String::new(),
+            sort_direction: 1,
+        })?)
+        .await
+        .expect_err("missing bearer token should be rejected");
+
+    assert!(matches!(
+        err.code(),
+        tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
+    ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn cursor_pagination_through_gateway() -> Result<()> {
+    let client = build_no_redirect_client()?;
+    wait_for_stack(&client).await?;
+
+    let gateway_port = env_or_default("ENVOY_HTTP_PORT", "8080");
+    let endpoint =
+        tonic::transport::Endpoint::from_shared(format!("http://localhost:{gateway_port}"))
+            .context("gateway endpoint should parse")?;
+    let channel = endpoint
+        .connect()
+        .await
+        .context("gRPC channel to gateway should connect")?;
+    let mut grpc = MetadataServiceClient::new(channel);
+
+    let access_token = fetch_access_token(&client, &gateway_port).await?;
+
+    let unique_prefix = format!(
+        "e2e-cursor-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+
+    for idx in 0..3 {
+        let create_request = CreateMetadataRequest {
+            title: format!("{unique_prefix}-{idx}"),
+            description: "cursor e2e".to_string(),
+            tags: vec![unique_prefix.clone()],
+            mime_type: "video/mp4".to_string(),
+            file_size: 100 + idx as i64,
+            visibility: Visibility::Public as i32,
+        };
+
+        grpc.create_metadata(authorized_grpc_request(create_request, &access_token)?)
+            .await
+            .context("create_metadata should succeed")?;
+    }
+
+    let first_page = grpc
+        .list_metadata(authorized_grpc_request(
+            ListMetadataRequest {
+                page_size: 2,
+                page_token: String::new(),
+                filter_owner_id: String::new(),
+                filter_visibility: 0,
+                filter_tags: vec![],
+                search_query: unique_prefix.clone(),
+                sort_direction: 1,
+            },
+            &access_token,
+        )?)
+        .await
+        .context("first paginated list should succeed")?
+        .into_inner();
+
+    assert_eq!(first_page.metadata_list.len(), 2);
+    assert!(first_page.has_exact_count);
+    assert!(!first_page.next_page_token.is_empty());
+
+    let second_page = grpc
+        .list_metadata(authorized_grpc_request(
+            ListMetadataRequest {
+                page_size: 2,
+                page_token: first_page.next_page_token.clone(),
+                filter_owner_id: String::new(),
+                filter_visibility: 0,
+                filter_tags: vec![],
+                search_query: unique_prefix,
+                sort_direction: 1,
+            },
+            &access_token,
+        )?)
+        .await
+        .context("second paginated list should succeed")?
+        .into_inner();
+
+    assert!(!second_page.metadata_list.is_empty());
+    assert!(!second_page.has_exact_count);
 
     Ok(())
 }
