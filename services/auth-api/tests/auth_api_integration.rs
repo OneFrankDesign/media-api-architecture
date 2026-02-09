@@ -390,7 +390,12 @@ async fn start_nonce_mismatch_oidc_server() -> Option<(String, String, JoinHandl
     let issuer = format!("http://{addr}");
     let discovery_url = format!("{issuer}/.well-known/openid-configuration");
     let access_token = build_access_token(unix_now() + 3600);
-    let id_token = build_rs256_id_token(&issuer, "media-api-client", "provider-nonce", unix_now() + 3600);
+    let id_token = build_rs256_id_token(
+        &issuer,
+        "media-api-client",
+        "provider-nonce",
+        unix_now() + 3600,
+    );
 
     let discovery_document = serde_json::json!({
         "authorization_endpoint": format!("{issuer}/authorize"),
@@ -554,18 +559,15 @@ async fn rate_limit_returns_too_many_requests_after_threshold() {
         third.expect("third request should complete").status(),
     ];
 
-    assert!(statuses.iter().any(|status| *status == StatusCode::CREATED));
-    assert!(statuses
-        .iter()
-        .any(|status| *status == StatusCode::TOO_MANY_REQUESTS));
+    assert!(statuses.contains(&StatusCode::CREATED));
+    assert!(statuses.contains(&StatusCode::TOO_MANY_REQUESTS));
 }
 
 #[tokio::test]
 async fn callback_rejects_expired_challenge_cookie() {
     let secret = vec![0x44; 32];
-    let signed =
-        sign_challenge_cookie_value("test-verifier", "state-1", "nonce-1", 1, &secret)
-            .expect("challenge should sign");
+    let signed = sign_challenge_cookie_value("test-verifier", "state-1", "nonce-1", 1, &secret)
+        .expect("challenge should sign");
 
     let app = build_app_with_options(
         AppState::new(String::new(), false).with_oidc(OidcConfig::new(
@@ -602,9 +604,14 @@ async fn callback_rejects_nonce_mismatch_after_token_verification() {
         return;
     };
     let secret = vec![0x55; 32];
-    let signed =
-        sign_challenge_cookie_value("test-verifier", "state-1", "cookie-nonce", i64::MAX, &secret)
-            .expect("challenge should sign");
+    let signed = sign_challenge_cookie_value(
+        "test-verifier",
+        "state-1",
+        "cookie-nonce",
+        i64::MAX,
+        &secret,
+    )
+    .expect("challenge should sign");
 
     let app = build_app_with_options(
         AppState::new(String::new(), false).with_oidc(OidcConfig::new(
@@ -650,8 +657,9 @@ async fn callback_clamps_session_cookie_max_age() {
     };
 
     let secret = vec![0x77; 32];
-    let signed = sign_challenge_cookie_value("test-verifier", "state-1", "nonce-1", i64::MAX, &secret)
-        .expect("challenge should sign");
+    let signed =
+        sign_challenge_cookie_value("test-verifier", "state-1", "nonce-1", i64::MAX, &secret)
+            .expect("challenge should sign");
     let app = build_app_with_options(
         AppState::new(String::new(), false).with_oidc(OidcConfig::new(
             issuer,
@@ -722,8 +730,9 @@ async fn callback_reuses_cached_jwks_within_ttl() {
     );
 
     for state in ["state-1", "state-2"] {
-        let signed = sign_challenge_cookie_value("test-verifier", state, "nonce-1", i64::MAX, &secret)
-            .expect("challenge should sign");
+        let signed =
+            sign_challenge_cookie_value("test-verifier", state, "nonce-1", i64::MAX, &secret)
+                .expect("challenge should sign");
         let response = app
             .clone()
             .oneshot(
