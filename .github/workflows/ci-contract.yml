@@ -24,8 +24,15 @@ jobs:
       - name: Lint protobuf contracts
         run: buf lint
 
+      - name: Fetch base ref for Buf breaking check
+        run: |
+          BASE_REF="${GITHUB_BASE_REF:-main}"
+          git fetch --no-tags origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+
       - name: Check protobuf contract compatibility
-        run: buf breaking --against '.git#branch=main'
+        run: |
+          BASE_REF="${GITHUB_BASE_REF:-main}"
+          buf breaking --against ".git#ref=refs/remotes/origin/${BASE_REF}"
 
       - name: Verify deterministic generation (tracked + untracked files)
         run: |
