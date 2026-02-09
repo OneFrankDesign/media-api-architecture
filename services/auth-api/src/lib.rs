@@ -484,12 +484,12 @@ async fn auth_callback(
     };
 
     let id_claims = match verify_id_token(&state, id_token, &discovery.jwks_uri, oidc).await {
-            Ok(claims) => claims,
-            Err(err) => {
-                error!(error = %err, "id token verification failed");
-                return unauthorized("invalid id token").into_response();
-            }
-        };
+        Ok(claims) => claims,
+        Err(err) => {
+            error!(error = %err, "id token verification failed");
+            return unauthorized("invalid id token").into_response();
+        }
+    };
 
     match id_claims.nonce {
         Some(nonce) if constant_time_equal(nonce.as_bytes(), payload.nonce.as_bytes()) => {}
@@ -510,8 +510,7 @@ async fn auth_callback(
     };
     let now = unix_now();
     let bounded_exp = exp.min(id_claims.exp);
-    let max_age = (bounded_exp - now)
-        .clamp(1, DEFAULT_SESSION_MAX_AGE_SECS as i64) as u64;
+    let max_age = (bounded_exp - now).clamp(1, DEFAULT_SESSION_MAX_AGE_SECS as i64) as u64;
 
     let session_token = Uuid::new_v4().to_string();
     let csrf_token = Uuid::new_v4().to_string();
@@ -1053,6 +1052,7 @@ fn load_oidc_config_from_env() -> Option<OidcConfig> {
     ))
 }
 
+#[allow(clippy::manual_is_multiple_of)]
 fn parse_hex_secret(raw: &str) -> Result<Vec<u8>, &'static str> {
     let value = raw.trim();
     if value.len() % 2 != 0 {
@@ -1217,7 +1217,7 @@ mod tests {
 
     #[test]
     fn sanitize_cookie_domain_rejects_invalid_inputs() {
-        let too_long_label = format!("{}", "a".repeat(64));
+        let too_long_label = "a".repeat(64);
         let too_long_domain = format!("{}.com", "a".repeat(254));
 
         assert!(sanitize_cookie_domain(".").is_err());

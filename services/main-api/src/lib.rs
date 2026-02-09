@@ -30,7 +30,8 @@ use api::v1::metadata_service_server::{MetadataService, MetadataServiceServer};
 use api::v1::{
     CreateMetadataRequest, CreateMetadataResponse, DeleteMetadataRequest, DeleteMetadataResponse,
     GetMetadataRequest, GetMetadataResponse, HealthRequest, HealthResponse, ListMetadataRequest,
-    ListMetadataResponse, UpdateMetadataRequest, UpdateMetadataResponse, VideoMetadata,
+    ListMetadataResponse, MetadataSortField, MetadataStatus, UpdateMetadataRequest,
+    UpdateMetadataResponse, VideoMetadata,
 };
 
 pub const DEFAULT_GRPC_ADDR: &str = "0.0.0.0:50051";
@@ -49,6 +50,7 @@ pub const DEFAULT_MAX_RECORDS: usize = 1_000_000;
 pub const DEFAULT_ADMIN_UNSCOPED_LIST_LIMIT: usize = 100_000;
 pub const DEFAULT_CURSOR_TTL_SECS: u64 = 300;
 pub const DEFAULT_CURSOR_SECRET: &str = "media-api-default-cursor-secret";
+pub const DEFAULT_MAX_TITLE_BYTES: usize = 256;
 static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 type HmacSha256 = Hmac<Sha256>;
 
@@ -59,12 +61,32 @@ pub enum SortDirection {
     Desc,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SortField {
+    #[default]
+    CreatedAt,
+    UpdatedAt,
+    Title,
+    FileSize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CursorPayload {
     pub last_created_at_seconds: i64,
     pub last_created_at_nanos: i32,
+    #[serde(default)]
+    pub last_updated_at_seconds: i64,
+    #[serde(default)]
+    pub last_updated_at_nanos: i32,
+    #[serde(default)]
+    pub last_title: String,
+    #[serde(default)]
+    pub last_file_size: i64,
     pub last_id: String,
     pub sort_direction: SortDirection,
+    #[serde(default)]
+    pub sort_field: SortField,
     pub filter_hash: u64,
     pub exp_unix: i64,
 }
@@ -278,6 +300,7 @@ impl MetadataService for MetadataServiceImpl {
         if req.title.trim().is_empty() {
             return Err(Status::invalid_argument("title is required"));
         }
+        let status = normalize_create_status(req.status)?;
 
         let id = Uuid::new_v4().to_string();
         let metadata = VideoMetadata {
@@ -290,6 +313,11 @@ impl MetadataService for MetadataServiceImpl {
             file_size: req.file_size,
             owner_id: identity.sub,
             visibility: req.visibility,
+            status,
+            resolution: req.resolution,
+            thumbnails: req.thumbnails,
+            stats: req.stats,
+            custom_metadata: req.custom_metadata,
             created_at: now_timestamp(),
             updated_at: now_timestamp(),
         };
@@ -301,9 +329,7 @@ impl MetadataService for MetadataServiceImpl {
             .capacity_limiter
             .clone()
             .try_acquire_owned()
-            .map_err(|_| {
-                Status::resource_exhausted("metadata store has reached max capacity")
-            })?;
+            .map_err(|_| Status::resource_exhausted("metadata store has reached max capacity"))?;
         if self.store.records.len() >= self.store.max_records {
             return Err(Status::resource_exhausted(
                 "metadata store has reached max capacity",
@@ -311,7 +337,9 @@ impl MetadataService for MetadataServiceImpl {
         }
 
         let metadata_ref = Arc::new(metadata.clone());
-        self.store.records.insert(id.clone(), Arc::clone(&metadata_ref));
+        self.store
+            .records
+            .insert(id.clone(), Arc::clone(&metadata_ref));
         self.store.add_indexes_for(metadata_ref.as_ref());
         self.store.capacity_permits.insert(id, permit);
 
@@ -374,8 +402,16 @@ impl MetadataService for MetadataServiceImpl {
             self.cursor_secret.as_ref(),
             self.cursor_ttl_secs,
         )?;
-        let filter_hash = compute_filter_hash(&req, &identity.sub, self.cursor_secret.as_ref());
+        normalize_filter_status(req.filter_status)?;
         let sort_direction = normalize_sort_direction(req.sort_direction)?;
+        let sort_field = normalize_sort_field(req.sort_field)?;
+        let filter_hash = compute_filter_hash(
+            &req,
+            &identity.sub,
+            sort_direction,
+            sort_field,
+            self.cursor_secret.as_ref(),
+        );
 
         if identity.is_admin
             && req.filter_owner_id.is_empty()
@@ -389,7 +425,9 @@ impl MetadataService for MetadataServiceImpl {
         let mut rows = self.collect_rows_for_owner_filter(&req.filter_owner_id);
         apply_list_filters(&mut rows, &req);
 
-        rows.sort_by(|left, right| compare_rows(left.as_ref(), right.as_ref(), sort_direction));
+        rows.sort_by(|left, right| {
+            compare_rows(left.as_ref(), right.as_ref(), sort_field, sort_direction)
+        });
 
         let (start, has_exact_count, total_count) = match page_token {
             PageTokenKind::Empty => (0, true, clamp_total_count(rows.len())),
@@ -400,6 +438,11 @@ impl MetadataService for MetadataServiceImpl {
                 if cursor.sort_direction != sort_direction {
                     return Err(Status::invalid_argument(
                         "cursor sort direction does not match request sort direction",
+                    ));
+                }
+                if cursor.sort_field != sort_field {
+                    return Err(Status::invalid_argument(
+                        "cursor sort field does not match request sort field",
                     ));
                 }
                 if cursor.filter_hash != filter_hash {
@@ -418,6 +461,7 @@ impl MetadataService for MetadataServiceImpl {
         let next_page_token = if end < rows.len() {
             let next_cursor = build_cursor_payload(
                 rows[end - 1].as_ref(),
+                sort_field,
                 sort_direction,
                 filter_hash,
                 self.cursor_ttl_secs,
@@ -532,6 +576,7 @@ impl MetadataService for MetadataServiceImpl {
     }
 }
 
+#[allow(clippy::result_large_err)]
 pub fn apply_field(
     target: &mut VideoMetadata,
     patch: &VideoMetadata,
@@ -550,7 +595,22 @@ pub fn apply_field(
                 "owner_id is server-managed and cannot be updated",
             ))
         }
+        "created_at" => {
+            return Err(Status::invalid_argument(
+                "created_at is server-managed and cannot be updated",
+            ))
+        }
+        "updated_at" => {
+            return Err(Status::invalid_argument(
+                "updated_at is server-managed and cannot be updated",
+            ))
+        }
         "visibility" => target.visibility = patch.visibility,
+        "status" => target.status = patch.status,
+        "resolution" => target.resolution = patch.resolution,
+        "thumbnails" => target.thumbnails = patch.thumbnails.clone(),
+        "stats" => target.stats = patch.stats,
+        "custom_metadata" => target.custom_metadata = patch.custom_metadata.clone(),
         _ => {
             return Err(Status::invalid_argument(format!(
                 "unsupported update_mask field: {field}"
@@ -561,9 +621,15 @@ pub fn apply_field(
     Ok(())
 }
 
+#[allow(clippy::result_large_err)]
 pub fn validate_metadata(metadata: &VideoMetadata) -> std::result::Result<(), Status> {
     if metadata.title.trim().is_empty() {
         return Err(Status::invalid_argument("title cannot be empty"));
+    }
+    if metadata.title.len() > DEFAULT_MAX_TITLE_BYTES {
+        return Err(Status::invalid_argument(format!(
+            "title length must be <= {DEFAULT_MAX_TITLE_BYTES} bytes"
+        )));
     }
 
     if metadata.mime_type.trim().is_empty() {
@@ -579,26 +645,95 @@ pub fn validate_metadata(metadata: &VideoMetadata) -> std::result::Result<(), St
             "visibility must be a known enum value",
         ));
     }
+    let status = MetadataStatus::try_from(metadata.status)
+        .map_err(|_| Status::invalid_argument("status must be a known enum value"))?;
+    if status == MetadataStatus::Unspecified {
+        return Err(Status::invalid_argument(
+            "status must not be METADATA_STATUS_UNSPECIFIED",
+        ));
+    }
+
+    if let Some(resolution) = metadata.resolution.as_ref() {
+        if resolution.width == 0 || resolution.height == 0 {
+            return Err(Status::invalid_argument(
+                "resolution width and height must be greater than zero",
+            ));
+        }
+    }
+
+    for thumbnail in &metadata.thumbnails {
+        if thumbnail.uri.trim().is_empty() {
+            return Err(Status::invalid_argument("thumbnail uri must not be empty"));
+        }
+        if thumbnail.width == 0 || thumbnail.height == 0 {
+            return Err(Status::invalid_argument(
+                "thumbnail width and height must be greater than zero",
+            ));
+        }
+    }
+
+    for key in metadata.custom_metadata.keys() {
+        if key.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "custom_metadata keys must not be empty",
+            ));
+        }
+    }
 
     Ok(())
 }
 
 pub fn sort_key(row: &VideoMetadata) -> (i64, i32, &str) {
-    let (seconds, nanos) = row
-        .created_at
-        .as_ref()
-        .map(|ts| (ts.seconds, ts.nanos))
-        .unwrap_or((0, 0));
+    let (seconds, nanos) = timestamp_key(row.created_at.as_ref());
 
     (seconds, nanos, row.id.as_str())
+}
+
+fn timestamp_key(timestamp: Option<&Timestamp>) -> (i64, i32) {
+    timestamp
+        .map(|value| (value.seconds, value.nanos))
+        .unwrap_or((0, 0))
+}
+
+fn compare_timestamp_then_id(
+    left_timestamp: Option<&Timestamp>,
+    right_timestamp: Option<&Timestamp>,
+    left_id: &str,
+    right_id: &str,
+) -> Ordering {
+    timestamp_key(left_timestamp)
+        .cmp(&timestamp_key(right_timestamp))
+        .then_with(|| left_id.cmp(right_id))
 }
 
 pub fn compare_rows(
     left: &VideoMetadata,
     right: &VideoMetadata,
+    sort_field: SortField,
     sort_direction: SortDirection,
 ) -> Ordering {
-    let ordering = sort_key(left).cmp(&sort_key(right));
+    let ordering = match sort_field {
+        SortField::CreatedAt => compare_timestamp_then_id(
+            left.created_at.as_ref(),
+            right.created_at.as_ref(),
+            left.id.as_str(),
+            right.id.as_str(),
+        ),
+        SortField::UpdatedAt => compare_timestamp_then_id(
+            left.updated_at.as_ref(),
+            right.updated_at.as_ref(),
+            left.id.as_str(),
+            right.id.as_str(),
+        ),
+        SortField::Title => left
+            .title
+            .cmp(&right.title)
+            .then_with(|| left.id.cmp(&right.id)),
+        SortField::FileSize => left
+            .file_size
+            .cmp(&right.file_size)
+            .then_with(|| left.id.cmp(&right.id)),
+    };
     match sort_direction {
         SortDirection::Asc => ordering,
         SortDirection::Desc => ordering.reverse(),
@@ -624,6 +759,7 @@ pub fn normalize_page_size(raw: i32) -> usize {
     raw.min(100) as usize
 }
 
+#[allow(clippy::result_large_err)]
 pub fn parse_page_token(token: &str) -> std::result::Result<usize, Status> {
     if token.is_empty() {
         return Ok(0);
@@ -634,6 +770,7 @@ pub fn parse_page_token(token: &str) -> std::result::Result<usize, Status> {
         .map_err(|_| Status::invalid_argument("invalid page_token: expected a numeric offset"))
 }
 
+#[allow(clippy::result_large_err)]
 pub fn classify_page_token(
     token: &str,
     secret: &[u8],
@@ -651,6 +788,7 @@ pub fn classify_page_token(
     decode_cursor_with_ttl(token, secret, _cursor_ttl_secs).map(PageTokenKind::Cursor)
 }
 
+#[allow(clippy::result_large_err)]
 pub fn parse_page_token_kind(
     token: &str,
     secret: &[u8],
@@ -709,7 +847,13 @@ pub fn load_cursor_ttl_secs() -> u64 {
     }
 }
 
-pub fn compute_filter_hash(req: &ListMetadataRequest, requester_sub: &str, secret: &[u8]) -> u64 {
+pub fn compute_filter_hash(
+    req: &ListMetadataRequest,
+    requester_sub: &str,
+    sort_direction: SortDirection,
+    sort_field: SortField,
+    secret: &[u8],
+) -> u64 {
     let mut mac =
         HmacSha256::new_from_slice(secret).expect("cursor secret should be valid for HMAC");
     mac.update(requester_sub.as_bytes());
@@ -717,6 +861,8 @@ pub fn compute_filter_hash(req: &ListMetadataRequest, requester_sub: &str, secre
     mac.update(req.filter_owner_id.as_bytes());
     mac.update(&[0]);
     mac.update(&req.filter_visibility.to_be_bytes());
+    mac.update(&[0]);
+    mac.update(&req.filter_status.to_be_bytes());
     mac.update(&[0]);
     // Canonicalize tags to avoid cursor invalidation when callers reorder identical filters.
     let mut canonical_tags: Vec<&str> = req.filter_tags.iter().map(String::as_str).collect();
@@ -727,6 +873,20 @@ pub fn compute_filter_hash(req: &ListMetadataRequest, requester_sub: &str, secre
         mac.update(&[0]);
     }
     mac.update(req.search_query.as_bytes());
+    mac.update(&[0]);
+    let canonical_sort_direction = match sort_direction {
+        SortDirection::Asc => api::v1::SortDirection::Asc as i32,
+        SortDirection::Desc => api::v1::SortDirection::Desc as i32,
+    };
+    mac.update(&canonical_sort_direction.to_be_bytes());
+    mac.update(&[0]);
+    let canonical_sort_field = match sort_field {
+        SortField::CreatedAt => MetadataSortField::CreatedAt as i32,
+        SortField::UpdatedAt => MetadataSortField::UpdatedAt as i32,
+        SortField::Title => MetadataSortField::Title as i32,
+        SortField::FileSize => MetadataSortField::FileSize as i32,
+    };
+    mac.update(&canonical_sort_field.to_be_bytes());
 
     let digest = mac.finalize().into_bytes();
     u64::from_be_bytes(
@@ -738,37 +898,67 @@ pub fn compute_filter_hash(req: &ListMetadataRequest, requester_sub: &str, secre
 
 pub fn build_cursor_payload(
     row: &VideoMetadata,
+    sort_field: SortField,
     sort_direction: SortDirection,
     filter_hash: u64,
     cursor_ttl_secs: u64,
 ) -> CursorPayload {
-    let (seconds, nanos) = row
-        .created_at
-        .as_ref()
-        .map(|ts| (ts.seconds, ts.nanos))
-        .unwrap_or((0, 0));
+    let (created_seconds, created_nanos) = timestamp_key(row.created_at.as_ref());
+    let (updated_seconds, updated_nanos) = timestamp_key(row.updated_at.as_ref());
 
     CursorPayload {
-        last_created_at_seconds: seconds,
-        last_created_at_nanos: nanos,
+        last_created_at_seconds: created_seconds,
+        last_created_at_nanos: created_nanos,
+        last_updated_at_seconds: updated_seconds,
+        last_updated_at_nanos: updated_nanos,
+        last_title: row.title.clone(),
+        last_file_size: row.file_size,
         last_id: row.id.clone(),
         sort_direction,
+        sort_field,
         filter_hash,
         exp_unix: unix_now().saturating_add(cursor_ttl_secs as i64),
     }
 }
 
+fn compare_row_with_cursor(row: &VideoMetadata, cursor: &CursorPayload) -> Ordering {
+    match cursor.sort_field {
+        SortField::CreatedAt => compare_timestamp_then_id(
+            row.created_at.as_ref(),
+            Some(&Timestamp {
+                seconds: cursor.last_created_at_seconds,
+                nanos: cursor.last_created_at_nanos,
+            }),
+            row.id.as_str(),
+            cursor.last_id.as_str(),
+        ),
+        SortField::UpdatedAt => compare_timestamp_then_id(
+            row.updated_at.as_ref(),
+            Some(&Timestamp {
+                seconds: cursor.last_updated_at_seconds,
+                nanos: cursor.last_updated_at_nanos,
+            }),
+            row.id.as_str(),
+            cursor.last_id.as_str(),
+        ),
+        SortField::Title => row
+            .title
+            .as_str()
+            .cmp(cursor.last_title.as_str())
+            .then_with(|| row.id.as_str().cmp(cursor.last_id.as_str())),
+        SortField::FileSize => row
+            .file_size
+            .cmp(&cursor.last_file_size)
+            .then_with(|| row.id.as_str().cmp(cursor.last_id.as_str())),
+    }
+}
+
 pub fn row_is_after_cursor(row: &VideoMetadata, cursor: &CursorPayload) -> bool {
-    let row_key = sort_key(row);
-    let cursor_key = (
-        cursor.last_created_at_seconds,
-        cursor.last_created_at_nanos,
-        cursor.last_id.as_str(),
-    );
+    let ordering = compare_row_with_cursor(row, cursor);
 
     match cursor.sort_direction {
-        SortDirection::Asc => row_key > cursor_key,
-        SortDirection::Desc => row_key < cursor_key,
+        SortDirection::Asc => ordering == Ordering::Greater,
+        SortDirection::Desc => ordering == Ordering::Less,
     }
 }
 
@@ -779,6 +969,10 @@ fn cursor_start_index(rows: &[Arc<VideoMetadata>], cursor: &CursorPayload) -> us
 fn apply_list_filters(rows: &mut Vec<Arc<VideoMetadata>>, req: &ListMetadataRequest) {
     if req.filter_visibility != 0 {
         rows.retain(|row| row.visibility == req.filter_visibility);
+    }
+
+    if req.filter_status != 0 {
+        rows.retain(|row| row.status == req.filter_status);
     }
 
     if !req.filter_tags.is_empty() {
@@ -794,6 +988,7 @@ fn apply_list_filters(rows: &mut Vec<Arc<VideoMetadata>>, req: &ListMetadataRequ
     }
 }
 
+#[allow(clippy::result_large_err)]
 pub fn encode_cursor(
     payload: &CursorPayload,
     secret: &[u8],
@@ -809,10 +1004,12 @@ pub fn encode_cursor(
     Ok(format!("{encoded_payload}.{signature}"))
 }
 
+#[allow(clippy::result_large_err)]
 pub fn decode_cursor(token: &str, secret: &[u8]) -> std::result::Result<CursorPayload, Status> {
     decode_cursor_with_ttl(token, secret, DEFAULT_CURSOR_TTL_SECS)
 }
 
+#[allow(clippy::result_large_err)]
 pub fn decode_cursor_with_ttl(
     token: &str,
     secret: &[u8],
@@ -858,6 +1055,7 @@ pub fn clamp_total_count(count: usize) -> i32 {
     count.try_into().unwrap_or(i32::MAX)
 }
 
+#[allow(clippy::result_large_err)]
 pub fn normalize_sort_direction(raw: i32) -> std::result::Result<SortDirection, Status> {
     match raw {
         0 | 1 => Ok(SortDirection::Asc),
@@ -868,6 +1066,39 @@ pub fn normalize_sort_direction(raw: i32) -> std::result::Result<SortDirection, 
     }
 }
 
+#[allow(clippy::result_large_err)]
+pub fn normalize_sort_field(raw: i32) -> std::result::Result<SortField, Status> {
+    let parsed = MetadataSortField::try_from(raw).map_err(|_| {
+        Status::invalid_argument(
+            "sort_field must be unspecified, created_at, updated_at, title, or file_size",
+        )
+    })?;
+    Ok(match parsed {
+        MetadataSortField::Unspecified | MetadataSortField::CreatedAt => SortField::CreatedAt,
+        MetadataSortField::UpdatedAt => SortField::UpdatedAt,
+        MetadataSortField::Title => SortField::Title,
+        MetadataSortField::FileSize => SortField::FileSize,
+    })
+}
+
+#[allow(clippy::result_large_err)]
+pub fn normalize_create_status(raw: i32) -> std::result::Result<i32, Status> {
+    let parsed = MetadataStatus::try_from(raw)
+        .map_err(|_| Status::invalid_argument("status must be a known enum value"))?;
+    Ok(match parsed {
+        MetadataStatus::Unspecified => MetadataStatus::Ready as i32,
+        _ => parsed as i32,
+    })
+}
+
+#[allow(clippy::result_large_err)]
+pub fn normalize_filter_status(raw: i32) -> std::result::Result<(), Status> {
+    MetadataStatus::try_from(raw)
+        .map(|_| ())
+        .map_err(|_| Status::invalid_argument("filter_status must be a known enum value"))
+}
+
+#[allow(clippy::result_large_err)]
 pub fn requester_identity(
     metadata: &MetadataMap,
 ) -> std::result::Result<RequesterIdentity, Status> {
@@ -888,6 +1119,7 @@ pub fn requester_identity(
     Ok(RequesterIdentity { sub, is_admin })
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_jwt_payload(raw: &str) -> std::result::Result<JwtPayloadClaims, Status> {
     if let Ok(claims) = serde_json::from_str::<JwtPayloadClaims>(raw) {
         return Ok(claims);
@@ -1098,6 +1330,11 @@ mod tests {
             file_size: 10,
             owner_id: "owner".to_string(),
             visibility: api::v1::Visibility::Private as i32,
+            status: MetadataStatus::Ready as i32,
+            resolution: None,
+            thumbnails: vec![],
+            stats: None,
+            custom_metadata: std::collections::HashMap::new(),
             created_at: Some(Timestamp { seconds, nanos }),
             updated_at: Some(Timestamp { seconds, nanos }),
         }
@@ -1130,6 +1367,10 @@ mod tests {
 
         metadata.title = "   ".to_string();
         let err = validate_metadata(&metadata).expect_err("empty title should fail");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        metadata.title = "a".repeat(DEFAULT_MAX_TITLE_BYTES + 1);
+        let err = validate_metadata(&metadata).expect_err("oversized title should fail");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
 
         metadata.title = "ok".to_string();
@@ -1179,7 +1420,9 @@ mod tests {
             sample_metadata("c", 9, 999),
         ];
 
-        rows.sort_by(|left, right| compare_rows(left, right, SortDirection::Asc));
+        rows.sort_by(|left, right| {
+            compare_rows(left, right, SortField::CreatedAt, SortDirection::Asc)
+        });
 
         let ids: Vec<String> = rows.into_iter().map(|row| row.id).collect();
         assert_eq!(ids, vec!["c".to_string(), "a".to_string(), "b".to_string()]);
@@ -1193,13 +1436,20 @@ mod tests {
             Arc::new(sample_metadata("c", 3, 0)),
             Arc::new(sample_metadata("d", 4, 0)),
         ];
-        rows.sort_by(|left, right| compare_rows(left, right, SortDirection::Asc));
+        rows.sort_by(|left, right| {
+            compare_rows(left, right, SortField::CreatedAt, SortDirection::Asc)
+        });
 
         let cursor = CursorPayload {
             last_created_at_seconds: 2,
             last_created_at_nanos: 0,
+            last_updated_at_seconds: 0,
+            last_updated_at_nanos: 0,
+            last_title: String::new(),
+            last_file_size: 0,
             last_id: "b".to_string(),
             sort_direction: SortDirection::Asc,
+            sort_field: SortField::CreatedAt,
             filter_hash: 0,
             exp_unix: unix_now() + 60,
         };
@@ -1230,6 +1480,11 @@ mod tests {
                     mime_type: "video/mp4".to_string(),
                     file_size: 1,
                     visibility: api::v1::Visibility::Private as i32,
+                    status: MetadataStatus::Unspecified as i32,
+                    resolution: None,
+                    thumbnails: vec![],
+                    stats: None,
+                    custom_metadata: std::collections::HashMap::new(),
                 },
                 "owner-1",
                 &["user"],
@@ -1246,6 +1501,11 @@ mod tests {
                     mime_type: "video/mp4".to_string(),
                     file_size: 1,
                     visibility: api::v1::Visibility::Private as i32,
+                    status: MetadataStatus::Unspecified as i32,
+                    resolution: None,
+                    thumbnails: vec![],
+                    stats: None,
+                    custom_metadata: std::collections::HashMap::new(),
                 },
                 "owner-1",
                 &["user"],
@@ -1277,6 +1537,11 @@ mod tests {
                             mime_type: "video/mp4".to_string(),
                             file_size: 1,
                             visibility: api::v1::Visibility::Private as i32,
+                            status: MetadataStatus::Unspecified as i32,
+                            resolution: None,
+                            thumbnails: vec![],
+                            stats: None,
+                            custom_metadata: std::collections::HashMap::new(),
                         },
                         "owner-1",
                         &["user"],
@@ -1320,6 +1585,11 @@ mod tests {
                         mime_type: "video/mp4".to_string(),
                         file_size: 1,
                         visibility: api::v1::Visibility::Private as i32,
+                        status: MetadataStatus::Unspecified as i32,
+                        resolution: None,
+                        thumbnails: vec![],
+                        stats: None,
+                        custom_metadata: std::collections::HashMap::new(),
                     },
                     "owner-1",
                     &["user"],
@@ -1420,6 +1690,11 @@ mod tests {
                     mime_type: "video/mp4".to_string(),
                     file_size: 1,
                     visibility: api::v1::Visibility::Private as i32,
+                    status: MetadataStatus::Unspecified as i32,
+                    resolution: None,
+                    thumbnails: vec![],
+                    stats: None,
+                    custom_metadata: std::collections::HashMap::new(),
                 },
                 "owner-1",
                 &["user"],
@@ -1439,6 +1714,11 @@ mod tests {
                     mime_type: "video/mp4".to_string(),
                     file_size: 1,
                     visibility: api::v1::Visibility::Private as i32,
+                    status: MetadataStatus::Unspecified as i32,
+                    resolution: None,
+                    thumbnails: vec![],
+                    stats: None,
+                    custom_metadata: std::collections::HashMap::new(),
                 },
                 "owner-1",
                 &["user"],
@@ -1468,6 +1748,11 @@ mod tests {
                     mime_type: "video/mp4".to_string(),
                     file_size: 1,
                     visibility: api::v1::Visibility::Private as i32,
+                    status: MetadataStatus::Unspecified as i32,
+                    resolution: None,
+                    thumbnails: vec![],
+                    stats: None,
+                    custom_metadata: std::collections::HashMap::new(),
                 },
                 "owner-1",
                 &["user"],
@@ -1481,8 +1766,13 @@ mod tests {
         let payload = CursorPayload {
             last_created_at_seconds: 10,
             last_created_at_nanos: 20,
+            last_updated_at_seconds: 0,
+            last_updated_at_nanos: 0,
+            last_title: String::new(),
+            last_file_size: 0,
             last_id: "id-1".to_string(),
             sort_direction: SortDirection::Asc,
+            sort_field: SortField::CreatedAt,
             filter_hash: 42,
             exp_unix: unix_now() + 60,
         };
@@ -1497,8 +1787,16 @@ mod tests {
             payload.last_created_at_seconds
         );
         assert_eq!(decoded.last_created_at_nanos, payload.last_created_at_nanos);
+        assert_eq!(
+            decoded.last_updated_at_seconds,
+            payload.last_updated_at_seconds
+        );
+        assert_eq!(decoded.last_updated_at_nanos, payload.last_updated_at_nanos);
+        assert_eq!(decoded.last_title, payload.last_title);
+        assert_eq!(decoded.last_file_size, payload.last_file_size);
         assert_eq!(decoded.last_id, payload.last_id);
         assert_eq!(decoded.sort_direction, payload.sort_direction);
+        assert_eq!(decoded.sort_field, payload.sort_field);
         assert_eq!(decoded.filter_hash, payload.filter_hash);
         assert_eq!(decoded.exp_unix, payload.exp_unix);
     }
@@ -1517,8 +1815,13 @@ mod tests {
         let payload = CursorPayload {
             last_created_at_seconds: 1,
             last_created_at_nanos: 0,
+            last_updated_at_seconds: 0,
+            last_updated_at_nanos: 0,
+            last_title: String::new(),
+            last_file_size: 0,
             last_id: "id-1".to_string(),
             sort_direction: SortDirection::Asc,
+            sort_field: SortField::CreatedAt,
             filter_hash: 7,
             exp_unix: unix_now() + 60,
         };
@@ -1537,8 +1840,13 @@ mod tests {
         let payload = CursorPayload {
             last_created_at_seconds: 1,
             last_created_at_nanos: 0,
+            last_updated_at_seconds: 0,
+            last_updated_at_nanos: 0,
+            last_title: String::new(),
+            last_file_size: 0,
             last_id: "id-1".to_string(),
             sort_direction: SortDirection::Asc,
+            sort_field: SortField::CreatedAt,
             filter_hash: 7,
             exp_unix: unix_now() + 60,
         };
@@ -1554,8 +1862,13 @@ mod tests {
         let payload = CursorPayload {
             last_created_at_seconds: 1,
             last_created_at_nanos: 0,
+            last_updated_at_seconds: 0,
+            last_updated_at_nanos: 0,
+            last_title: String::new(),
+            last_file_size: 0,
             last_id: "id-1".to_string(),
             sort_direction: SortDirection::Asc,
+            sort_field: SortField::CreatedAt,
             filter_hash: 7,
             exp_unix: unix_now() - 1,
         };
@@ -1655,10 +1968,15 @@ mod tests {
             filter_tags: vec!["tag-a".to_string()],
             search_query: "needle".to_string(),
             sort_direction: 0,
+            filter_status: MetadataStatus::Unspecified as i32,
+            sort_field: MetadataSortField::CreatedAt as i32,
         };
+        let sort_direction =
+            normalize_sort_direction(req.sort_direction).expect("sort direction should normalize");
+        let sort_field = normalize_sort_field(req.sort_field).expect("sort field should normalize");
         let secret = b"cursor-secret";
-        let first = compute_filter_hash(&req, "user-a", secret);
-        let second = compute_filter_hash(&req, "user-b", secret);
+        let first = compute_filter_hash(&req, "user-a", sort_direction, sort_field, secret);
+        let second = compute_filter_hash(&req, "user-b", sort_direction, sort_field, secret);
         assert_ne!(first, second);
     }
 
@@ -1676,16 +1994,68 @@ mod tests {
             ],
             search_query: "needle".to_string(),
             sort_direction: 0,
+            filter_status: MetadataStatus::Unspecified as i32,
+            sort_field: MetadataSortField::CreatedAt as i32,
         };
         let req_b = ListMetadataRequest {
             filter_tags: vec!["tag-a".to_string(), "tag-b".to_string()],
             ..req_a.clone()
         };
+        let sort_direction = normalize_sort_direction(req_a.sort_direction)
+            .expect("sort direction should normalize");
+        let sort_field =
+            normalize_sort_field(req_a.sort_field).expect("sort field should normalize");
         let secret = b"cursor-secret";
 
-        let hash_a = compute_filter_hash(&req_a, "user-a", secret);
-        let hash_b = compute_filter_hash(&req_b, "user-a", secret);
+        let hash_a = compute_filter_hash(&req_a, "user-a", sort_direction, sort_field, secret);
+        let hash_b = compute_filter_hash(&req_b, "user-a", sort_direction, sort_field, secret);
         assert_eq!(hash_a, hash_b);
+    }
+
+    #[test]
+    fn compute_filter_hash_treats_unspecified_and_explicit_sort_equally() {
+        let req_unspecified = ListMetadataRequest {
+            page_size: 20,
+            page_token: String::new(),
+            filter_owner_id: "owner-1".to_string(),
+            filter_visibility: 0,
+            filter_tags: vec!["tag-a".to_string()],
+            search_query: "needle".to_string(),
+            sort_direction: api::v1::SortDirection::Unspecified as i32,
+            filter_status: MetadataStatus::Unspecified as i32,
+            sort_field: MetadataSortField::Unspecified as i32,
+        };
+        let req_explicit = ListMetadataRequest {
+            sort_direction: api::v1::SortDirection::Asc as i32,
+            sort_field: MetadataSortField::CreatedAt as i32,
+            ..req_unspecified.clone()
+        };
+
+        let unspecified_direction = normalize_sort_direction(req_unspecified.sort_direction)
+            .expect("unspecified sort direction should normalize");
+        let unspecified_field = normalize_sort_field(req_unspecified.sort_field)
+            .expect("unspecified sort field should normalize");
+        let explicit_direction = normalize_sort_direction(req_explicit.sort_direction)
+            .expect("explicit sort direction should normalize");
+        let explicit_field = normalize_sort_field(req_explicit.sort_field)
+            .expect("explicit sort field should normalize");
+
+        let secret = b"cursor-secret";
+        let hash_unspecified = compute_filter_hash(
+            &req_unspecified,
+            "user-a",
+            unspecified_direction,
+            unspecified_field,
+            secret,
+        );
+        let hash_explicit = compute_filter_hash(
+            &req_explicit,
+            "user-a",
+            explicit_direction,
+            explicit_field,
+            secret,
+        );
+        assert_eq!(hash_unspecified, hash_explicit);
     }
 
     #[test]
@@ -1709,6 +2079,8 @@ mod tests {
                     filter_tags: vec![],
                     search_query: String::new(),
                     sort_direction: 0,
+                    filter_status: MetadataStatus::Unspecified as i32,
+                    sort_field: MetadataSortField::CreatedAt as i32,
                 },
                 "caller-owner",
                 &["user"],
@@ -1737,6 +2109,11 @@ mod tests {
                         mime_type: "video/mp4".to_string(),
                         file_size: 1,
                         visibility: api::v1::Visibility::Private as i32,
+                        status: MetadataStatus::Unspecified as i32,
+                        resolution: None,
+                        thumbnails: vec![],
+                        stats: None,
+                        custom_metadata: std::collections::HashMap::new(),
                     },
                     "owner-a",
                     &["user"],
@@ -1755,6 +2132,8 @@ mod tests {
                     filter_tags: vec![],
                     search_query: String::new(),
                     sort_direction: 1,
+                    filter_status: MetadataStatus::Unspecified as i32,
+                    sort_field: MetadataSortField::CreatedAt as i32,
                 },
                 "admin-user",
                 &["admin"],

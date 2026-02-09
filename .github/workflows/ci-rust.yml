@@ -17,5 +17,11 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cargo fmt check
+        run: cargo fmt --all --check
+
+      - name: Cargo clippy workspace (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
       - name: Cargo check workspace
         run: cargo check --workspace
