@@ -3,7 +3,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use main_api::api::v1::metadata_service_client::MetadataServiceClient;
-use main_api::api::v1::{CreateMetadataRequest, ListMetadataRequest, Visibility};
+use main_api::api::v1::{
+    CreateMetadataRequest, ListMetadataRequest, MetadataSortField, MetadataStatus, Visibility,
+};
 use reqwest::{header, redirect::Policy, Client, StatusCode, Url};
 use serde_json::json;
 use tokio::time::sleep;
@@ -598,6 +600,8 @@ async fn gateway_grpc_rejects_missing_bearer_token() -> Result<()> {
             filter_tags: vec![],
             search_query: String::new(),
             sort_direction: 1,
+            filter_status: MetadataStatus::Unspecified as i32,
+            sort_field: MetadataSortField::CreatedAt as i32,
         })?)
         .await
         .expect_err("missing bearer token should be rejected");
@@ -643,6 +647,11 @@ async fn cursor_pagination_through_gateway() -> Result<()> {
             mime_type: "video/mp4".to_string(),
             file_size: 100 + idx as i64,
             visibility: Visibility::Public as i32,
+            status: MetadataStatus::Ready as i32,
+            resolution: None,
+            thumbnails: vec![],
+            stats: None,
+            custom_metadata: std::collections::HashMap::new(),
         };
 
         grpc.create_metadata(authorized_grpc_request(create_request, &access_token)?)
@@ -660,6 +669,8 @@ async fn cursor_pagination_through_gateway() -> Result<()> {
                 filter_tags: vec![],
                 search_query: unique_prefix.clone(),
                 sort_direction: 1,
+                filter_status: MetadataStatus::Ready as i32,
+                sort_field: MetadataSortField::CreatedAt as i32,
             },
             &access_token,
         )?)
@@ -681,6 +692,8 @@ async fn cursor_pagination_through_gateway() -> Result<()> {
                 filter_tags: vec![],
                 search_query: unique_prefix,
                 sort_direction: 1,
+                filter_status: MetadataStatus::Ready as i32,
+                sort_field: MetadataSortField::CreatedAt as i32,
             },
             &access_token,
         )?)
@@ -690,6 +703,94 @@ async fn cursor_pagination_through_gateway() -> Result<()> {
 
     assert!(!second_page.metadata_list.is_empty());
     assert!(!second_page.has_exact_count);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_rejects_cursor_with_changed_filter_status() -> Result<()> {
+    let client = build_no_redirect_client()?;
+    wait_for_stack(&client).await?;
+
+    let gateway_port = env_or_default("ENVOY_HTTP_PORT", "8080");
+    let endpoint =
+        tonic::transport::Endpoint::from_shared(format!("http://localhost:{gateway_port}"))
+            .context("gateway endpoint should parse")?;
+    let channel = endpoint
+        .connect()
+        .await
+        .context("gRPC channel to gateway should connect")?;
+    let mut grpc = MetadataServiceClient::new(channel);
+
+    let access_token = fetch_access_token(&client, &gateway_port).await?;
+    let unique_prefix = format!(
+        "e2e-cursor-filter-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+
+    for idx in 0..3 {
+        grpc.create_metadata(authorized_grpc_request(
+            CreateMetadataRequest {
+                title: format!("{unique_prefix}-{idx}"),
+                description: "cursor filter mismatch e2e".to_string(),
+                tags: vec![unique_prefix.clone()],
+                mime_type: "video/mp4".to_string(),
+                file_size: 100 + idx as i64,
+                visibility: Visibility::Private as i32,
+                status: MetadataStatus::Ready as i32,
+                resolution: None,
+                thumbnails: vec![],
+                stats: None,
+                custom_metadata: std::collections::HashMap::new(),
+            },
+            &access_token,
+        )?)
+        .await
+        .context("create_metadata should succeed")?;
+    }
+
+    let first_page = grpc
+        .list_metadata(authorized_grpc_request(
+            ListMetadataRequest {
+                page_size: 2,
+                page_token: String::new(),
+                filter_owner_id: String::new(),
+                filter_visibility: 0,
+                filter_tags: vec![],
+                search_query: unique_prefix.clone(),
+                sort_direction: 1,
+                filter_status: MetadataStatus::Ready as i32,
+                sort_field: MetadataSortField::CreatedAt as i32,
+            },
+            &access_token,
+        )?)
+        .await
+        .context("first paginated list should succeed")?
+        .into_inner();
+    assert!(!first_page.next_page_token.is_empty());
+
+    let err = grpc
+        .list_metadata(authorized_grpc_request(
+            ListMetadataRequest {
+                page_size: 2,
+                page_token: first_page.next_page_token,
+                filter_owner_id: String::new(),
+                filter_visibility: 0,
+                filter_tags: vec![],
+                search_query: unique_prefix,
+                sort_direction: 1,
+                filter_status: MetadataStatus::Failed as i32,
+                sort_field: MetadataSortField::CreatedAt as i32,
+            },
+            &access_token,
+        )?)
+        .await
+        .expect_err("cursor should fail when filter_status changes");
+
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
 
     Ok(())
 }
