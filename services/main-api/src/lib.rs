@@ -50,6 +50,7 @@ pub const DEFAULT_MAX_RECORDS: usize = 1_000_000;
 pub const DEFAULT_ADMIN_UNSCOPED_LIST_LIMIT: usize = 100_000;
 pub const DEFAULT_CURSOR_TTL_SECS: u64 = 300;
 pub const DEFAULT_CURSOR_SECRET: &str = "media-api-default-cursor-secret";
+pub const DEFAULT_MAX_TITLE_BYTES: usize = 256;
 static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 type HmacSha256 = Hmac<Sha256>;
 
@@ -624,6 +625,11 @@ pub fn apply_field(
 pub fn validate_metadata(metadata: &VideoMetadata) -> std::result::Result<(), Status> {
     if metadata.title.trim().is_empty() {
         return Err(Status::invalid_argument("title cannot be empty"));
+    }
+    if metadata.title.len() > DEFAULT_MAX_TITLE_BYTES {
+        return Err(Status::invalid_argument(format!(
+            "title length must be <= {DEFAULT_MAX_TITLE_BYTES} bytes"
+        )));
     }
 
     if metadata.mime_type.trim().is_empty() {
@@ -1361,6 +1367,10 @@ mod tests {
 
         metadata.title = "   ".to_string();
         let err = validate_metadata(&metadata).expect_err("empty title should fail");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        metadata.title = "a".repeat(DEFAULT_MAX_TITLE_BYTES + 1);
+        let err = validate_metadata(&metadata).expect_err("oversized title should fail");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
 
         metadata.title = "ok".to_string();

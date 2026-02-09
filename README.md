@@ -67,7 +67,8 @@ Protobuf remains the source of truth:
 - edit `proto/api/v1/metadata.proto` additively
 - validate with:
   - `buf lint`
-  - `buf breaking --against '.git#branch=main'`
+  - local: `buf breaking --against '.git#branch=main'`
+  - CI: `buf breaking --against ".git#ref=refs/remotes/origin/${BASE_REF}"`
 - regenerate SDK artifacts with:
   - `bash scripts/gen-proto.sh`
 

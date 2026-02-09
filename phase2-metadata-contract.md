@@ -116,7 +116,9 @@ message VideoStats {
 2. No field renumbering, reuse, or removal.
 3. Existing enum numeric values remain stable.
 4. Existing request/response field behavior remains backward compatible.
-5. Buf lint + Buf breaking (`--against '.git#branch=main'`) are required gates.
+5. Buf lint + Buf breaking are required gates.
+   - local baseline command: `buf breaking --against '.git#branch=main'`
+   - CI baseline command: `buf breaking --against ".git#ref=refs/remotes/origin/${BASE_REF}"`
 
 ## Acceptance Tests
 
@@ -149,7 +151,7 @@ message VideoStats {
 5. `cargo test -p main-api --test main_api_integration`
 6. `cargo test -p e2e-harness --test gateway_e2e -- --nocapture`
 7. `buf lint`
-8. `buf breaking --against '.git#branch=main'`
+8. `buf breaking --against '.git#branch=main'` (local) or `buf breaking --against ".git#ref=refs/remotes/origin/${BASE_REF}"` (CI)
 9. `bash scripts/gen-proto.sh`
 10. `pnpm health:report`
 
