@@ -41,6 +41,11 @@ message VideoMetadata {
   Visibility visibility = 9;
   google.protobuf.Timestamp created_at = 10;
   google.protobuf.Timestamp updated_at = 11;
+  MetadataStatus status = 12;
+  VideoResolution resolution = 13;
+  repeated Thumbnail thumbnails = 14;
+  VideoStats stats = 15;
+  map<string, string> custom_metadata = 16;
 }
 
 enum Visibility {
@@ -56,6 +61,39 @@ enum SortDirection {
   SORT_DIRECTION_DESC = 2;
 }
 
+enum MetadataStatus {
+  METADATA_STATUS_UNSPECIFIED = 0;
+  METADATA_STATUS_PROCESSING = 1;
+  METADATA_STATUS_READY = 2;
+  METADATA_STATUS_FAILED = 3;
+  METADATA_STATUS_ARCHIVED = 4;
+}
+
+enum MetadataSortField {
+  METADATA_SORT_FIELD_UNSPECIFIED = 0;
+  METADATA_SORT_FIELD_CREATED_AT = 1;
+  METADATA_SORT_FIELD_UPDATED_AT = 2;
+  METADATA_SORT_FIELD_TITLE = 3;
+  METADATA_SORT_FIELD_FILE_SIZE = 4;
+}
+
+message VideoResolution {
+  uint32 width = 1;
+  uint32 height = 2;
+}
+
+message Thumbnail {
+  string uri = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+}
+
+message VideoStats {
+  uint64 view_count = 1;
+  uint64 like_count = 2;
+  uint64 comment_count = 3;
+}
+
 message CreateMetadataRequest {
   string title = 1;
   string description = 2;
@@ -63,6 +101,11 @@ message CreateMetadataRequest {
   string mime_type = 4;
   int64 file_size = 5;
   Visibility visibility = 6;
+  MetadataStatus status = 7;
+  VideoResolution resolution = 8;
+  repeated Thumbnail thumbnails = 9;
+  VideoStats stats = 10;
+  map<string, string> custom_metadata = 11;
 }
 
 message GetMetadataRequest {
@@ -71,16 +114,22 @@ message GetMetadataRequest {
 
 message ListMetadataRequest {
   int32 page_size = 1;
+  // Opaque cursor from a previous next_page_token.
+  // Callers must keep all filter/sort parameters stable across pages.
+  // Any tamper or mismatch is rejected with INVALID_ARGUMENT.
   string page_token = 2;
   string filter_owner_id = 3;
   Visibility filter_visibility = 4;
   repeated string filter_tags = 5;
   string search_query = 6;
   SortDirection sort_direction = 7;
+  MetadataStatus filter_status = 8;
+  MetadataSortField sort_field = 9;
 }
 
 message ListMetadataResponse {
   repeated VideoMetadata metadata_list = 1;
+  // Opaque signed cursor for the next page; empty means no additional pages.
   string next_page_token = 2;
   // Exact filtered count on first page, estimated remaining count for cursor pages.
   int32 total_count = 3;
