@@ -4,7 +4,7 @@ Security-first Rust monorepo for a media metadata platform behind an Envoy gatew
 
 ## Current Stage
 
-Phase 1 foundation + hardening is in place:
+Phase 2 contract completion is in place:
 
 - gateway defense-in-depth chain is active (security headers, origin/CORS checks, CSRF, JWT, OPA, gRPC-Web, router)
 - ingress now strips `x-jwt-payload`; only `jwt_authn` can forward it downstream
@@ -12,6 +12,8 @@ Phase 1 foundation + hardening is in place:
 - main-api cursor tokens are HMAC signed, expiring, and verified with constant-time signature checks
 - release builds now fail fast when `CURSOR_SECRET` is missing (debug builds keep a warned fallback)
 - auth-api exposes `/metrics`, and Prometheus scrapes both auth-api and main-api
+- metadata protobuf now includes `MetadataStatus`, `MetadataSortField`, and richer metadata fields (resolution/thumbnails/stats/custom metadata)
+- sdk wrapper now uses generated protobuf request/response types (no `unknown` contract stubs)
 
 ## Services
 
@@ -58,6 +60,23 @@ pnpm compose:down
 pnpm smoke
 ```
 
+## Contract and Typed SDK Workflow
+
+Protobuf remains the source of truth:
+
+- edit `proto/api/v1/metadata.proto` additively
+- validate with:
+  - `buf lint`
+  - `buf breaking --against '.git#branch=main'`
+- regenerate SDK artifacts with:
+  - `bash scripts/gen-proto.sh`
+
+Generated TypeScript protobuf artifacts are committed under:
+
+- `packages/sdk-ts/src/gen/**`
+
+CI enforces deterministic generation and fails if generated artifacts drift (including untracked files).
+
 ## Health Report
 
 Use the repo-level health command for a full local stack check and report:
@@ -97,6 +116,9 @@ Behavior guarantees:
 Security-critical coverage includes:
 
 - malformed cursor rejection and expiry handling
+- cursor tamper/filter mismatch rejection
+- stable cursor pagination for ASC/DESC ordering
+- list filtering/sorting using metadata status and sort field semantics
 - non-owner permission denial paths
 - auth-api rate-limit `429` behavior
 - gateway gRPC rejection for missing bearer token
