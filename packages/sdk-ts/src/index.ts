@@ -1,3 +1,21 @@
+import type {
+  CreateMetadataRequest,
+  CreateMetadataResponse,
+  DeleteMetadataRequest,
+  DeleteMetadataResponse,
+  GetMetadataRequest,
+  GetMetadataResponse,
+  ListMetadataRequest,
+  ListMetadataResponse,
+  Thumbnail,
+  UpdateMetadataRequest,
+  UpdateMetadataResponse,
+  VideoMetadata,
+  VideoResolution,
+  VideoStats,
+} from "./gen/api/v1/metadata_pb";
+export { MetadataSortField, MetadataStatus } from "./gen/api/v1/metadata_pb";
+
 export type RequestMetadata = Record<string, string>;
 
 export interface AuthContext {
@@ -6,11 +24,23 @@ export interface AuthContext {
 }
 
 export interface GeneratedMetadataClient {
-  createMetadata(request: unknown, metadata: RequestMetadata): Promise<unknown>;
-  getMetadata(request: unknown, metadata: RequestMetadata): Promise<unknown>;
-  listMetadata(request: unknown, metadata: RequestMetadata): Promise<unknown>;
-  updateMetadata(request: unknown, metadata: RequestMetadata): Promise<unknown>;
-  deleteMetadata(request: unknown, metadata: RequestMetadata): Promise<unknown>;
+  createMetadata(
+    request: CreateMetadataRequest,
+    metadata: RequestMetadata
+  ): Promise<CreateMetadataResponse>;
+  getMetadata(request: GetMetadataRequest, metadata: RequestMetadata): Promise<GetMetadataResponse>;
+  listMetadata(
+    request: ListMetadataRequest,
+    metadata: RequestMetadata
+  ): Promise<ListMetadataResponse>;
+  updateMetadata(
+    request: UpdateMetadataRequest,
+    metadata: RequestMetadata
+  ): Promise<UpdateMetadataResponse>;
+  deleteMetadata(
+    request: DeleteMetadataRequest,
+    metadata: RequestMetadata
+  ): Promise<DeleteMetadataResponse>;
 }
 
 export class MediaApiSdk {
@@ -31,23 +61,40 @@ export class MediaApiSdk {
     return headers;
   }
 
-  createMetadata(request: unknown): Promise<unknown> {
+  createMetadata(request: CreateMetadataRequest): Promise<CreateMetadataResponse> {
     return this.client.createMetadata(request, this.metadata());
   }
 
-  getMetadata(request: unknown): Promise<unknown> {
+  getMetadata(request: GetMetadataRequest): Promise<GetMetadataResponse> {
     return this.client.getMetadata(request, this.metadata());
   }
 
-  listMetadata(request: unknown): Promise<unknown> {
+  listMetadata(request: ListMetadataRequest): Promise<ListMetadataResponse> {
     return this.client.listMetadata(request, this.metadata());
   }
 
-  updateMetadata(request: unknown): Promise<unknown> {
+  updateMetadata(request: UpdateMetadataRequest): Promise<UpdateMetadataResponse> {
     return this.client.updateMetadata(request, this.metadata());
   }
 
-  deleteMetadata(request: unknown): Promise<unknown> {
+  deleteMetadata(request: DeleteMetadataRequest): Promise<DeleteMetadataResponse> {
     return this.client.deleteMetadata(request, this.metadata());
   }
 }
+
+export type {
+  CreateMetadataRequest,
+  CreateMetadataResponse,
+  DeleteMetadataRequest,
+  DeleteMetadataResponse,
+  GetMetadataRequest,
+  GetMetadataResponse,
+  ListMetadataRequest,
+  ListMetadataResponse,
+  Thumbnail,
+  UpdateMetadataRequest,
+  UpdateMetadataResponse,
+  VideoMetadata,
+  VideoResolution,
+  VideoStats,
+};

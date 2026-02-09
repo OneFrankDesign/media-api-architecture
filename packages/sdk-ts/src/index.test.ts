@@ -2,29 +2,76 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   AuthContext,
+  CreateMetadataRequest,
+  CreateMetadataResponse,
+  DeleteMetadataRequest,
+  DeleteMetadataResponse,
+  GetMetadataRequest,
+  GetMetadataResponse,
   GeneratedMetadataClient,
+  ListMetadataRequest,
+  ListMetadataResponse,
   MediaApiSdk,
   RequestMetadata,
+  UpdateMetadataRequest,
+  UpdateMetadataResponse,
 } from "./index";
 
 describe("MediaApiSdk", () => {
-  let calls: Array<{ method: string; metadata: RequestMetadata; request: unknown }>;
+  type AnySdkRequest =
+    | CreateMetadataRequest
+    | GetMetadataRequest
+    | ListMetadataRequest
+    | UpdateMetadataRequest
+    | DeleteMetadataRequest;
+
+  let calls: Array<{ method: string; metadata: RequestMetadata; request: AnySdkRequest }>;
   let client: GeneratedMetadataClient;
 
   beforeEach(() => {
     calls = [];
 
-    const record = (method: string) => (request: unknown, metadata: RequestMetadata) => {
-      calls.push({ method, metadata, request });
-      return Promise.resolve({ method, ok: true });
-    };
+    const record =
+      <TRequest extends AnySdkRequest, TResponse>(
+        method: string,
+        response: TResponse
+      ) =>
+      (request: TRequest, metadata: RequestMetadata) => {
+        calls.push({ method, metadata, request });
+        return Promise.resolve(response);
+      };
 
     client = {
-      createMetadata: vi.fn(record("createMetadata")),
-      getMetadata: vi.fn(record("getMetadata")),
-      listMetadata: vi.fn(record("listMetadata")),
-      updateMetadata: vi.fn(record("updateMetadata")),
-      deleteMetadata: vi.fn(record("deleteMetadata")),
+      createMetadata: vi.fn(
+        record<CreateMetadataRequest, CreateMetadataResponse>(
+          "createMetadata",
+          {} as CreateMetadataResponse
+        )
+      ),
+      getMetadata: vi.fn(
+        record<GetMetadataRequest, GetMetadataResponse>(
+          "getMetadata",
+          {} as GetMetadataResponse
+        )
+      ),
+      listMetadata: vi.fn(
+        record<ListMetadataRequest, ListMetadataResponse>(
+          "listMetadata",
+          {} as ListMetadataResponse
+        )
+      ),
+      updateMetadata: vi.fn(
+        record<UpdateMetadataRequest, UpdateMetadataResponse>(
+          "updateMetadata",
+          {} as UpdateMetadataResponse
+        )
+      ),
+      deleteMetadata: vi.fn(
+        record<DeleteMetadataRequest, DeleteMetadataResponse>(
+          "deleteMetadata",
+          {} as DeleteMetadataResponse
+        )
+      ),
     };
   });
 
@@ -42,7 +89,7 @@ describe("MediaApiSdk", () => {
     const auth: AuthContext = { accessToken: "token-1", csrfToken: "csrf-1" };
     const sdk = new MediaApiSdk(client, auth);
 
-    await sdk.createMetadata({ id: "request-1" });
+    await sdk.createMetadata({ title: "request-1" } as CreateMetadataRequest);
 
     expect(calls).toHaveLength(1);
     expect(calls[0].method).toBe("createMetadata");
@@ -53,7 +100,7 @@ describe("MediaApiSdk", () => {
     const auth: AuthContext = { accessToken: "token-2" };
     const sdk = new MediaApiSdk(client, auth);
 
-    await sdk.getMetadata({ id: "request-2" });
+    await sdk.getMetadata({ id: "request-2" } as GetMetadataRequest);
 
     expect(calls).toHaveLength(1);
     expect(calls[0].method).toBe("getMetadata");
@@ -64,11 +111,11 @@ describe("MediaApiSdk", () => {
     const auth: AuthContext = { accessToken: "token-3", csrfToken: "csrf-3" };
     const sdk = new MediaApiSdk(client, auth);
 
-    await sdk.createMetadata({ payload: "create" });
-    await sdk.getMetadata({ payload: "get" });
-    await sdk.listMetadata({ payload: "list" });
-    await sdk.updateMetadata({ payload: "update" });
-    await sdk.deleteMetadata({ payload: "delete" });
+    await sdk.createMetadata({ title: "create" } as CreateMetadataRequest);
+    await sdk.getMetadata({ id: "get" } as GetMetadataRequest);
+    await sdk.listMetadata({ pageSize: 1 } as ListMetadataRequest);
+    await sdk.updateMetadata({ id: "update" } as UpdateMetadataRequest);
+    await sdk.deleteMetadata({ id: "delete" } as DeleteMetadataRequest);
 
     expect(calls.map((call) => call.method)).toEqual([
       "createMetadata",
